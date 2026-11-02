@@ -37,7 +37,8 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
    node bin/setup.mjs                                            # 生成配置并打印启动命令
    ```
 
-3. 运行打印出来的命令。启动时要确认一次开发 channel。`-p` 模式下不生效。
+3. 自检：`node bin/doctor.mjs`，按功能列出缺的权限和影响。核心权限缺失时退出码 1，常驻进程也不会启动。事件订阅没有查询接口，要照输出手动核对。
+4. 运行 `setup.mjs` 打印的命令。启动时要确认一次开发 channel。`-p` 模式下不生效。
 
 用 `--mcp-config` 和 `--settings` 而不是项目配置：没带 channel 参数的会话不该接这个桥，也不该跑这些 hook。
 
@@ -64,6 +65,8 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 | `recallPollSec` | 否 | `60` | 撤回轮询兜底间隔，0 关闭 |
 | `recallWindowSec` | 否 | `3600` | 轮询覆盖多久内送达的消息 |
 | `sweepSec` | 否 | `600` | 定时全量补漏间隔，0 关闭 |
+| `recallHintSec` | 否 | `30` | 轮询发现撤回后，等多久没收到事件就提示可能没订阅 |
+| `expectedScopes` / `expectedScopesFile` | 否 | | 部署方应有的全部权限（数组，或存数组的 JSON 文件）。`doctor` 报多了、少了哪些，用来发现后台配置被改动 |
 
 ## 行为
 
@@ -72,6 +75,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 - **停**：白名单发送者的文本消息整条是「停」才触发。清空队列，杀当前前台 Bash 工具的进程树（后台任务和 Claude Code 本身不动），之后的工具调用被拒绝，这一轮结束，回群报丢了几条。
 - **撤回**：排队中的直接不送；已送达的自动停，再补发一条作废说明。
 - **表情**：`GLANCE` 排队，`OneSecond` 处理中，`CheckMark` 完成，`CrossMark` 已停或作废。
+- **自检**：常驻进程启动时按功能检查权限。核心权限（收消息、拉历史、发消息、拉群列表）缺失就退出，外层循环 5 分钟后再试；其余只记日志并在卡片上提示。权限查询本身失败不挡启动。轮询发现撤回而同一条没收到事件时，日志和卡片提示「撤回事件可能没订阅」，每次启动只提示一次。
 - **状态卡片**：置顶在 `statusChat`，内容变化才更新：忙闲、几点起、当前工具名、排队数、下一个定时。只写工具名，不写命令内容。
 - **定时**：会话用 `schedule_add`、`schedule_list`、`schedule_remove` 管理，落盘，会话、常驻进程、容器重开都不丢。`once` 一次性（`YYYY-MM-DD HH:MM` 按配置时区，或带时区的 ISO 时间），`daily` 每天，`weekly` 每周，`process` 等某个 pid 结束。`text` 写清做什么、看哪个文件。到点进同一条队列，和消息合并时标清哪条是定时。不在线时错过的，上线后补发并标明晚了多久；过了宽限期只在群里回报跳过。「停」清掉已触发的定时并暂停其余定时，下一条新指令恢复，恢复后按错过处理。
 
@@ -89,6 +93,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 - 按 Esc 或崩溃后，处理中的表情不会变成完成；Esc 后默认约 3 分钟才判闲。
 - 模型思考超过 `busyTimeoutSec` 且没有工具调用时，会被判闲并提前送出。
 - 重开会话后第一条消息约 `wakeTimeoutSec` 秒才到。
+- 事件订阅无法自动检查，开放平台没有查询接口。
 - 撤回事件未订阅时只靠轮询，有延迟，且 `recallWindowSec` 外的撤回不处理。
 - 只有一个 `statusChat`，定时消息都发到这里。
 - 同一应用只跑一个常驻进程、一个会话。

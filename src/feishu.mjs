@@ -70,6 +70,10 @@ export function connect(cfg, log) {
   }
   const client = new lark.Client(base)
   return {
+    async grantedScopes() {
+      const data = ok(await client.request({ method: 'GET', url: '/open-apis/application/v6/scopes' }))
+      return (data.scopes ?? []).filter(s => s.grant_status === 1).map(s => s.scope_name)
+    },
     async listChats() {
       const out = []
       for await (const page of await client.im.chat.listWithIterator({ params: { page_size: 100 } })) out.push(...(page?.items ?? []))

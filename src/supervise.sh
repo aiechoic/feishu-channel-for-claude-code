@@ -5,5 +5,7 @@ exec 9>"$1"
 flock -n 9 || exit 0
 while :; do
   node "$here/daemon.mjs" 9>&-
+  # 78：核心权限缺失，重启也没用，等久一点
+  [ $? -eq 78 ] && sleep 300
   sleep 2
 done

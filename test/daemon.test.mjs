@@ -418,3 +418,59 @@ test('定时：送达后撤回的作废说明不解除暂停', () => rig(async r
   await until(() => r.pushes.length === 4, '恢复后补发')
   assert.match(r.pushes[3].content, /暂停中/)
 }))
+
+const scoped = (r, list) => writeFileSync(join(r.dir, 'scopes.json'), JSON.stringify(list))
+
+test('自检：核心权限缺失时退出码 78，不连长连接', async () => {
+  const r = new Rig()
+  try {
+    scoped(r, ['im:chat'])
+    r.daemon = spawn('node', [join(ROOT, 'src', 'daemon.mjs')], { env: r.env, stdio: 'ignore' })
+    const code = await new Promise(res => r.daemon.on('exit', res))
+    assert.equal(code, 78)
+    assert.match(r.log(), /缺权限.*影响：/)
+    assert.equal(r.file('consume.log'), '')
+  } finally { r.close() }
+})
+
+test('自检：非核心权限缺失照常启动，卡片提示；查询失败不挡启动', async () => {
+  const r = new Rig()
+  try {
+    scoped(r, ['im:chat', 'im:message:readonly', 'im:message:send_as_bot', 'im:message.group_msg', 'im:message.p2p_msg:readonly'])
+    await r.startDaemon()
+    await until(() => r.log().includes('im:message.reactions:write_only 或 im:message，影响：'), '缺表情权限')
+    await r.bridge()
+    await until(() => r.file('card.txt').includes('send') || r.file('card.txt').includes('patch'), '卡片')
+  } finally { r.close() }
+  const q = new Rig()
+  try {
+    writeFileSync(join(q.dir, 'scopes-fail'), '')
+    await q.startDaemon()
+    await until(() => q.log().includes('权限查询失败'), '查询失败')
+    assert.ok(q.file('consume.log'))
+  } finally { q.close() }
+})
+
+test('轮询发现撤回而事件没来：提示一次；事件来了不提示', () => rig(async r => {
+  await sleep(500) // 过启动空档
+  r.add(msg('om_a'))
+  await until(() => r.pushes.length === 1, '送达')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  r.messages[0].deleted = true
+  r.write()
+  await until(() => r.log().includes('撤回事件可能没订阅'), '提示')
+  await until(() => r.pushes.length === 2, '作废说明')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  r.add(msg('om_b'))
+  await until(() => r.pushes.length === 3, '送达')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  const b = r.messages.find(m => m.message_id === 'om_b')
+  b.deleted = true
+  r.write()
+  await until(() => r.pushes.length === 4, '第二次撤回')
+  await sleep(300)
+  assert.equal(r.log().match(/撤回事件可能没订阅/g).length, 1)
+}, { recallPollSec: 0.1, recallHintSec: 0.05 }))

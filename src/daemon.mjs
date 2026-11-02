@@ -19,6 +19,7 @@ import {
 import { createServer } from 'node:net'
 import { createInterface } from 'node:readline'
 import { paths, readConfig } from './common.mjs'
+import { checkScopes } from './doctor.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
 
 const cfg = readConfig()
@@ -35,6 +36,8 @@ const TZ = cfg.timezone ?? 'Asia/Shanghai'
 const GRACE_MIN = { once: cfg.onceGraceMin ?? 10_080, daily: cfg.repeatGraceMin ?? 720, weekly: cfg.repeatGraceMin ?? 720 }
 const TICK_MS = (cfg.scheduleTickSec ?? 15) * 1000
 const LATE_MS = 60_000
+const RECALL_HINT_MS = (cfg.recallHintSec ?? 30) * 1000
+const startedAt = Date.now()
 const CARD_RETRY_MS = 30_000
 const CLIP = 6000
 const MAX_PAGES = 5
@@ -111,6 +114,7 @@ function cardBody() {
   const lines = [`**状态**：${state}（${hhmm(S.since)} 起）`, `**排队**：${S.queue.length} 条`]
   if (S.busy && tool) lines.splice(1, 0, `**当前工具**：${tool}`)
   const upcoming = nextSchedule()
+  warnings.forEach(w => lines.push(`**提示**：${w}`))
   if (S.schedulesPaused) lines.push('**定时**：已暂停')
   else if (upcoming) lines.push(`**下一个定时**：${wall(upcoming.nextAt, TZ)}`)
   return {
@@ -120,6 +124,7 @@ function cardBody() {
   }
 }
 
+const warnings = new Set()
 let cardShown = ''
 let cardTimer = null
 function refreshCard() {
@@ -391,6 +396,22 @@ function doStop(chat, why, trigger) {
   effect('停的回执', () => send(chat, `已停，丢了 ${dropped.length} 条${lost.length ? `（含定时 ${lost.join(' ')}）` : ''}。${killed ? '当前工具进程已杀。' : ''}定时已暂停，等新指令。`))
 }
 
+const RECALL_HINT = '撤回事件可能没订阅'
+const eventRecalled = new Set()
+let hinted = false
+
+/** 轮询先发现时等一会，事件还是没来才提示；重启空档里的撤回本来就收不到事件，不算 */
+function suspectNoRecallEvent(id) {
+  if (hinted || Date.now() - startedAt < RECALL_POLL_MS * 2) return
+  setTimeout(() => {
+    if (hinted || eventRecalled.has(id)) return
+    hinted = true
+    warnings.add(RECALL_HINT)
+    log(`${RECALL_HINT}：${id} 只有轮询发现，没有收到事件`)
+    refreshCard()
+  }, RECALL_HINT_MS).unref()
+}
+
 async function pollRecalls() {
   const now = Date.now()
   for (const [id, d] of Object.entries(S.delivered)) {
@@ -402,6 +423,7 @@ async function pollRecalls() {
     if (m?.deleted) {
       log(`轮询发现撤回 ${id}`)
       onRecall(id)
+      suspectNoRecallEvent(id)
     }
   }
 }
@@ -646,12 +668,33 @@ function shutdown(why) {
   setTimeout(() => process.exit(0), 300)
 }
 
+/** 核心权限缺失就退出；其余只提示。查询本身失败不挡启动 */
+async function selfCheck() {
+  let granted
+  try {
+    granted = await feishu.grantedScopes()
+  } catch (e) {
+    return log(`权限查询失败，跳过自检：${e.message}`)
+  }
+  const r = checkScopes(granted)
+  for (const n of r.missing) {
+    log(`缺权限 ${n.anyOf.join(' 或 ')}，影响：${n.effect}`)
+    if (!n.core) warnings.add(`缺权限：${n.feature}`)
+  }
+  if (r.coreMissing.length) {
+    log(`核心权限缺失（${r.coreMissing.map(n => n.feature).join('、')}），退出`)
+    process.exit(78)
+  }
+  refreshCard()
+}
+
 process.on('unhandledRejection', e => log(`unhandledRejection: ${e}`))
 process.on('uncaughtException', e => log(`uncaughtException: ${e}`))
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => shutdown(sig))
 
 server.listen(P.sock, async () => {
   log(`常驻进程启动 pid=${process.pid}`)
+  await selfCheck()
   me = cfg.appId
   await schedule()
   if (firstRun) log('首次运行：现有消息已记为已读')
@@ -669,6 +712,7 @@ server.listen(P.sock, async () => {
     },
     onRecall: id => {
       log(`收到撤回事件 ${id}`)
+      eventRecalled.add(id)
       onRecall(id)
     },
   })

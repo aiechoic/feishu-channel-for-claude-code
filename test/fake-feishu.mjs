@@ -9,6 +9,10 @@ const brief = content => `${content.match(/忙|闲|离线/)?.[0] ?? ''} ${conten
 export function connect() {
   return {
     listChats: async () => ['oc_group'],
+    async grantedScopes() {
+      if (existsSync(`${dir}/scopes-fail`)) throw new Error('无权查询')
+      return existsSync(`${dir}/scopes.json`) ? JSON.parse(readFileSync(`${dir}/scopes.json`, 'utf8')) : ['im:message', 'im:chat', 'im:message.group_msg', 'im:message.p2p_msg:readonly']
+    },
     async listMessages(chat) {
       if (existsSync(`${dir}/list-fail`)) {
         rmSync(`${dir}/list-fail`)
