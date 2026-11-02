@@ -1,4 +1,5 @@
 // 飞书适配器：只用官方 Node SDK。daemon 只依赖这里导出的接口，测试用 FEISHU_ADAPTER 换成假实现。
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import * as lark from '@larksuiteoapi/node-sdk'
 
@@ -43,8 +44,20 @@ const normal = m => ({
   sender: { id: m.sender?.id ?? '', sender_type: m.sender?.sender_type ?? '', name: m.sender?.name ?? '' },
 })
 
+/** 网络错误重试；发消息带同一个 uuid，服务端去重，不会发两条 */
+export async function withRetry(fn, { tries = 3, waitMs = 1000 } = {}) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn()
+    } catch (e) {
+      if (i >= tries || e.feishuCode) throw e
+      await new Promise(r => setTimeout(r, waitMs * i))
+    }
+  }
+}
+
 const ok = r => {
-  if (r?.code) throw new Error(`飞书接口 ${r.code}: ${r.msg}`)
+  if (r?.code) throw Object.assign(new Error(`飞书接口 ${r.code}: ${r.msg}`), { feishuCode: r.code })
   return r?.data
 }
 
@@ -64,7 +77,7 @@ export function connect(cfg, log) {
     },
     async listMessages(chat, pageToken) {
       const data = ok(await client.im.message.list({
-        params: { container_id_type: 'chat', container_id: chat, sort_type: 'ByCreateTimeDesc', page_size: 50, ...(pageToken ? { page_token: pageToken } : {}) },
+        params: { container_id_type: 'chat', container_id: chat, sort_type: 'ByCreateTimeDesc', page_size: 50, with_sender_name: true, ...(pageToken ? { page_token: pageToken } : {}) },
       }))
       return { messages: (data.items ?? []).map(normal), hasMore: Boolean(data.has_more), pageToken: data.page_token }
     },
@@ -73,11 +86,11 @@ export function connect(cfg, log) {
       return data.items?.[0] ? normal(data.items[0]) : null
     },
     async sendText(chat, text) {
-      const data = ok(await client.im.message.create({
+      const uuid = randomUUID()
+      return withRetry(async () => ok(await client.im.message.create({
         params: { receive_id_type: 'chat_id' },
-        data: { receive_id: chat, msg_type: 'text', content: JSON.stringify({ text }) },
-      }))
-      return data.message_id
+        data: { receive_id: chat, msg_type: 'text', content: JSON.stringify({ text }), uuid },
+      })).message_id)
     },
     async addReaction(id, emoji) {
       return ok(await client.im.messageReaction.create({ path: { message_id: id }, data: { reaction_type: { emoji_type: emoji } } })).reaction_id

@@ -458,7 +458,7 @@ function accept(m, chat, isGroup) {
     message_id: m.message_id,
     content: m.content ?? '',
     sender_id: s.id ?? '',
-    sender_name: s.name ?? '',
+    sender_name: cfg.names?.[s.id] ?? s.name ?? '',
     sender_type: s.sender_type ?? '',
     msg_type: m.msg_type ?? '',
     create_time: m.create_time ?? '',

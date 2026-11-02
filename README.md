@@ -53,6 +53,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 | `allow` | 是 | | 放行的发送者 id：用户 open_id（每个应用看到的不同）、机器人 app_id |
 | `statusChat` | 否 | | 状态卡片和定时消息所在的群；不配就没有卡片和定时 |
 | `name` | 否 | `Claude Code` | 卡片标题 |
+| `names` | 否 | | 发送者 id → 显示名。接口常不返回姓名，不配时 `sender_name` 可能为空 |
 | `domain` | 否 | `feishu` | `lark` 用于国际版 |
 | `stateDir` | 否 | `~/.local/state/feishu-channel` | 状态目录 |
 | `timezone` | 否 | `Asia/Shanghai` | 定时所用时区 |
