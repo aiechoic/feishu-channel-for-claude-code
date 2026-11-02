@@ -1,0 +1,27 @@
+{
+  "name": "feishu-channel-for-claude-code",
+  "version": "0.1.0",
+  "description": "Bring Feishu/Lark chats into a running Claude Code session via Channels",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.76.0",
+    "@modelcontextprotocol/sdk": "1.32.2"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "config.example.json"
+  ],
+  "devDependencies": {
+    "zod": "4.6.7"
+  }
+}

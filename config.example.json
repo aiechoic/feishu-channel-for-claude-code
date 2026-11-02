@@ -1,0 +1,6 @@
+{
+  "appId": "cli_xxxxxxxxxxxxxxxx",
+  "appSecretFile": "/path/to/app-secret",
+  "allow": ["ou_your_open_id"],
+  "statusChat": "oc_your_chat_id"
+}
