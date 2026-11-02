@@ -35,6 +35,7 @@ const TZ = cfg.timezone ?? 'Asia/Shanghai'
 const GRACE_MIN = { once: cfg.onceGraceMin ?? 10_080, daily: cfg.repeatGraceMin ?? 720, weekly: cfg.repeatGraceMin ?? 720 }
 const TICK_MS = (cfg.scheduleTickSec ?? 15) * 1000
 const LATE_MS = 60_000
+const CARD_RETRY_MS = 30_000
 const CLIP = 6000
 const MAX_PAGES = 5
 const RETRY_MIN_MS = (cfg.retrySec ?? 5) * 1000
@@ -83,8 +84,11 @@ function save() {
 // ---------- 飞书侧效果：表情和卡片，串行，失败只记日志 ----------
 
 let fx = Promise.resolve()
-const effect = (what, fn) => {
-  fx = fx.then(fn).catch(e => log(`${what} 失败：${e.message}`))
+const effect = (what, fn, onFail) => {
+  fx = fx.then(fn).catch(e => {
+    log(`${what} 失败：${e.message}`)
+    onFail?.()
+  })
 }
 
 function react(id, kind) {
@@ -133,6 +137,9 @@ function refreshCard() {
       S.card = await feishu.sendCard(cfg.statusChat, content)
       save()
       await feishu.pin(S.card)
+    }, () => { // 下次检查时重发，不让卡片停在旧状态
+      cardShown = ''
+      setTimeout(refreshCard, CARD_RETRY_MS).unref()
     })
   }, CARD_DEBOUNCE_MS)
 }

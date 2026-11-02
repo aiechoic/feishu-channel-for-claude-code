@@ -92,6 +92,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 - 撤回事件未订阅时只靠轮询，有延迟，且 `recallWindowSec` 外的撤回不处理。
 - 只有一个 `statusChat`，定时消息都发到这里。
 - 同一应用只跑一个常驻进程、一个会话。
+- 长连接重连由官方 SDK 负责；连接悄悄失效时靠 `sweepSec` 的定时全量补漏兜底，最长延迟这么久。
 
 ## 测试
 
