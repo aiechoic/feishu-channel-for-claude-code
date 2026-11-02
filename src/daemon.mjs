@@ -171,10 +171,11 @@ function setIdle(why, finished) {
 
 function onHook(h) {
   log(`hook ${h.event}${h.tool ? ` ${h.tool}` : ''}${h.blocked ? '（已拦）' : ''}`)
+  const systemWake = waking?.batch.every(m => m.notice) // 系统说明和定时唤醒的一轮不算新指令
   woke() // 只在闲时送出，送出后的任何 hook 都说明会话收到了
   switch (h.event) {
     case 'UserPromptSubmit':
-      S.schedulesPaused = false
+      if (!systemWake) S.schedulesPaused = false
       rmSync(P.stopFlag, { force: true })
       setBusy(h.event)
       break
@@ -282,7 +283,7 @@ function deliver() {
   const ids = batch.filter(m => !m.notice).map(m => m.message_id)
   const content = batch.length === 1
     ? clip(first.content)
-    : batch.map(m => `[${m.label ?? m.message_id ?? '系统说明'} ${m.sender_name ?? ''} ${m.create_time ?? ''}]\n${clip(m.content)}`).join('\n\n')
+    : batch.map(m => `[${[m.label ?? m.message_id ?? '系统说明', m.sender_name, m.create_time].filter(Boolean).join(' ')}]\n${clip(m.content)}`).join('\n\n')
   pushing = { batch, pushId: `${Date.now()}` }
   rmSync(P.stopFlag, { force: true })
   setBusy('送出消息')
@@ -391,7 +392,10 @@ async function pollRecalls() {
   const ids = [...S.queue.filter(m => !m.notice).map(m => m.message_id), ...Object.keys(S.delivered)]
   for (const id of ids) {
     const m = await feishu.getMessage(id)
-    if (m?.deleted) onRecall(id)
+    if (m?.deleted) {
+      log(`轮询发现撤回 ${id}`)
+      onRecall(id)
+    }
   }
 }
 
@@ -656,7 +660,10 @@ server.listen(P.sock, async () => {
       }
       schedule(chat)
     },
-    onRecall,
+    onRecall: id => {
+      log(`收到撤回事件 ${id}`)
+      onRecall(id)
+    },
   })
   if (SWEEP_MS > 0) setInterval(() => schedule(), SWEEP_MS).unref()
   setInterval(watchdog, 5000).unref()
