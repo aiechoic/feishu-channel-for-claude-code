@@ -68,12 +68,19 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 | `recallHintSec` | 否 | `30` | 轮询发现撤回后，等多久没收到事件就提示可能没订阅 |
 | `expectedScopes` / `expectedScopesFile` | 否 | | 部署方应有的全部权限（数组，或存数组的 JSON 文件）。`doctor` 报多了、少了哪些，用来发现后台配置被改动 |
 
+### 机器人发送者走快路
+
+事件里的发送者只有 open_id，机器人也一样。`allow` 里写机器人的 `cli_` app id 也能放行，但每条消息要多一次 get（约 1 秒）。想省掉这一步，把它的 open_id 也写进 `allow`，`names` 里同样加一条。
+
+同一个机器人在不同应用看到的 open_id 不同，每个应用要各自查：让那个机器人发一条消息，在日志里找 `事件到达 … 发送者 ou_…`。
+
 ## 行为
 
 - **忙闲**：`UserPromptSubmit` 和送出标忙，`Stop` 标闲，工具 hook 写心跳。按 Esc 没有 `Stop`，靠心跳超时恢复。桥断开算离线。
 - **合并送达**：闲时把同一会话的排队消息合并成一条。送出后等到 hook 才算送达，因为 Claude Code 未就绪时会静默丢通知；等不到就退回队列退避重发，重发的 `meta.retry` 有值，按 `message_id` 去重。
 - **停**：白名单发送者的文本消息整条是「停」才触发。清空队列，杀当前前台 Bash 工具的进程树（后台任务和 Claude Code 本身不动），之后的工具调用被拒绝，这一轮结束，回群报丢了几条。
-- **撤回**：排队中的直接不送；已送达的自动停，再补发一条作废说明。
+- **收消息**：事件带的内容直接入队，不拉历史。发送者的 open_id 在 `allow` 里才走这条路；对不上或缺字段时 get 单条，按它返回的发送者（机器人是 `cli_` 开头的 app id）再判一次。get 失败或入队失败时立即补拉这个会话，列表暂时没有就退避重试。入队后再在后台拉一次这个会话，补上没来事件的消息，不影响送达速度。全量补漏用来补断线期间的消息。
+- **撤回**：排队中的从队列撤下，回执「已从队列撤下」。正在处理的打断这一轮（拦工具调用、杀前台工具），回执写明消息 id，再补发作废说明；队列不清。已处理完的回执「已作废」，补发作废说明。撤回都不暂停定时，只有「停」暂停。
 - **表情**：`GLANCE` 排队，`OneSecond` 处理中，`CheckMark` 完成，`CrossMark` 已停或作废。
 - **自检**：常驻进程启动时按功能检查权限。核心权限（收消息、拉历史、发消息、拉群列表）缺失就退出，外层循环 5 分钟后再试；其余只记日志并在卡片上提示。权限查询本身失败不挡启动。轮询发现撤回而同一条没收到事件时，日志和卡片提示「撤回事件可能没订阅」，每次启动只提示一次。
 - **状态卡片**：置顶在 `statusChat`，内容变化才更新：忙闲、几点起、当前工具名、排队数、下一个定时。只写工具名，不写命令内容。
@@ -98,6 +105,27 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 - 只有一个 `statusChat`，定时消息都发到这里。
 - 同一应用只跑一个常驻进程、一个会话。
 - 长连接重连由官方 SDK 负责；连接悄悄失效时靠 `sweepSec` 的定时全量补漏兜底，最长延迟这么久。
+
+## 排查
+
+收消息慢时先看日志（`<stateDir>/<appId>.log`，时间是 UTC，带毫秒）。一条消息依次有：`事件到达`（创建→到达、事件时间→到达）、走 get 时的 `get 确认`、补漏时的 `拉取开始` / `拉取结束`、`入队`（创建→入队）、`已送出`（创建→送出）、`已唤醒`。
+
+**日志里的「创建→」都减去了飞书服务端时间，先量本机时钟偏差再读。** 虚拟机和容器的时钟可能差好几秒，这部分不是真实延迟。「拉取」「get 确认」「送出→唤醒」是本机计时，不受影响。
+
+量法：在同一条 HTTPS 长连接上连续请求飞书，取响应头 `Date` 的时间戳 `s`（精确到秒），记下请求前后的本机时间 `t0`、`t1`。本机领先量落在 `max(t0 - s - 1)` 到 `min(t1 - s)` 之间，采样 10 次以上、持续几秒就能缩到 1 秒内：
+
+```python
+import email.utils, http.client, time
+c = http.client.HTTPSConnection('open.feishu.cn', timeout=5)
+lo, hi, end = -1e9, 1e9, time.time() + 6
+while time.time() < end:
+    t0 = time.time(); c.request('HEAD', '/'); r = c.getresponse(); r.read(); t1 = time.time()
+    s = email.utils.parsedate_to_datetime(r.headers['Date']).timestamp()
+    lo, hi = max(lo, t0 - s - 1), min(hi, t1 - s)
+print(f'本机领先 {lo:.3f}..{hi:.3f} 秒')
+```
+
+对照：本机记下发一条消息前后的时间，减去返回的 `create_time`，结果应落在同一范围。
 
 ## 测试
 

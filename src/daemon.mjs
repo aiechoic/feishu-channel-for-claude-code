@@ -2,13 +2,14 @@
 /**
  * 飞书 channel 常驻进程：持有事件长连接、已读记录、消息队列、定时和忙闲状态，由 supervise.sh 负责重启。
  *
- * 收：飞书长连接事件 + 启动 / 连上时全量补漏 + 定时全量补漏，以已读记录为准，不漏不重。
+ * 收：长连接事件带的内容直接入队；启动 / 连上时和定时全量补漏只补漏。以已读记录为准，不漏不重。
  * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
+ *   事件里的发送者对不上 allow 时（机器人只有 open_id），按 get 单条拿到的发送者再判一次。
  * 送：闲时把队列里同一会话的消息合并成一条，经桥（bridge.mjs）送出，桥确认后出队。
  *   会话没就绪时 Claude Code 会静默丢掉通知，所以送出后等到 hook 才算唤醒，等不到退回队列重发。
  * 忙闲：hook.mjs 上报。忙且心跳超时、且没有活着的工具进程时按闲处理。
  * 停：白名单发送者整条消息就是「停」时，清空队列、写停止标记、杀当前工具进程。
- * 撤回：im.message.recalled_v1 事件，低频轮询兜底。
+ * 撤回：im.message.recalled_v1 事件，低频轮询兜底。排队中的撤下；正在处理的打断这一轮；已处理完的只作废。都不暂停定时。
  * 定时：到点进同一条队列；会话不在线时等上线补发，过了宽限期只回报跳过。
  *
  * 配置字段见 config.example.json。环境变量 FEISHU_CHANNEL_CONFIG 换配置文件，FEISHU_ADAPTER 换飞书适配器（测试用）。
@@ -58,6 +59,8 @@ function log(msg) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const words = file => (existsSync(file) ? readFileSync(file, 'utf8').split(/\s+/).filter(Boolean) : [])
+/** 距某时刻的毫秒数；缺时间戳时返回 ? */
+const ago = ms => (ms > 0 ? Date.now() - ms : '?')
 const hhmm = ms => new Date(ms).toTimeString().slice(0, 5)
 
 // ---------- 持久状态 ----------
@@ -330,7 +333,7 @@ function onAck(pushId) {
     S.delivered[m.message_id] = { chat: m.chat, at: Date.now() }
     react(m.message_id, 'active')
   }
-  log(`已送出 ${batch.length} 条：${batch.map(m => m.message_id ?? '说明').join(' ')}`)
+  log(`已送出 ${batch.length} 条：${batch.map(m => (m.notice ? '说明' : `${m.message_id}（创建→送出 ${ago(m.createMs)}ms）`)).join(' ')}`)
   save()
   refreshCard()
   const wait = Math.min(WAKE_TIMEOUT_MS * 2 ** wakeTries, WAKE_TIMEOUT_MAX_MS)
@@ -363,6 +366,7 @@ function notWoken() {
 function enqueue(item) {
   S.queue.push(item)
   save()
+  if (!item.notice) log(`入队 ${item.message_id}：创建→入队 ${ago(item.createMs)}ms，忙 ${S.busy}，桥 ${Boolean(bridge)}`)
   if (!item.notice && (S.busy || !bridge || pushing)) react(item.message_id, 'queued')
   refreshCard()
   deliver()
@@ -371,6 +375,15 @@ function enqueue(item) {
 // ---------- 停和撤回 ----------
 
 const send = (chat, text) => feishu.sendText(chat, text)
+
+/** 写停止标记拦下工具调用，杀当前工具进程；返回杀了没有 */
+function interrupt(why) {
+  if (!S.busy) return false
+  writeFileSync(P.stopFlag, why)
+  const pid = toolProcess()
+  if (pid) killTree(pid)
+  return Boolean(pid)
+}
 
 function doStop(chat, why, trigger) {
   const dropped = [...S.queue]
@@ -381,15 +394,7 @@ function doStop(chat, why, trigger) {
   S.active = []
   react(trigger, 'stopped')
   S.schedulesPaused = true
-  let killed = false
-  if (S.busy) {
-    writeFileSync(P.stopFlag, why)
-    const pid = toolProcess()
-    if (pid) {
-      killTree(pid)
-      killed = true
-    }
-  }
+  const killed = interrupt(why)
   log(`停（${why}）：丢 ${dropped.length} 条，杀工具 ${killed}`)
   save()
   refreshCard()
@@ -435,16 +440,30 @@ function onRecall(id) {
     delete S.reactions[id]
     log(`排队中撤回 ${id}，不送`)
     save()
-    return refreshCard()
+    refreshCard()
+    effect('撤回回执', () => send(queued.chat, `消息 ${id} 已从队列撤下`))
+    return
   }
   const d = S.delivered[id]
   if (!d) return
+  const running = S.busy && S.active.includes(id)
   delete S.delivered[id]
   delete S.reactions[id]
   S.active = S.active.filter(a => a !== id)
-  log(`送达后撤回 ${id}`)
-  doStop(d.chat, `消息 ${id} 撤回`)
-  enqueue({ notice: true, chat: d.chat, content: `消息 ${id} 已撤回、作废，已开始的部分停下并报告做了什么` })
+  if (!running) {
+    log(`处理完后撤回 ${id}`)
+    effect('撤回回执', () => send(d.chat, `消息 ${id} 已作废`))
+    enqueue({ notice: true, chat: d.chat, content: `消息 ${id} 已撤回、作废，那一轮已经结束，不要再按它继续做` })
+    return
+  }
+  const peers = [...S.active]
+  peers.forEach(a => react(a, 'stopped'))
+  S.active = []
+  const killed = interrupt(`消息 ${id} 撤回`)
+  log(`处理中撤回 ${id}：打断这一轮，杀工具 ${killed}`)
+  save()
+  effect('撤回回执', () => send(d.chat, `消息 ${id} 已撤回，正在处理它的这一轮已打断。${killed ? '当前工具进程已杀。' : ''}`))
+  enqueue({ notice: true, chat: d.chat, content: `消息 ${id} 已撤回、作废，已开始的部分停下并报告做了什么${peers.length ? `。同一轮的 ${peers.join(' ')} 没有撤回，仍要处理` : ''}` })
 }
 
 // ---------- 补漏 ----------
@@ -491,31 +510,76 @@ function accept(m, chat, isGroup) {
     message_id: m.message_id,
     content: m.content ?? '',
     sender_id: s.id ?? '',
-    sender_name: cfg.names?.[s.id] ?? s.name ?? '',
+    sender_name: cfg.names?.[s.id] || s.name || s.id || '',
     sender_type: s.sender_type ?? '',
     msg_type: m.msg_type ?? '',
     create_time: m.create_time ?? '',
+    createMs: m.create_ms,
   })
 }
 
-async function catchUpChat(chat, isGroup) {
-  const fresh = isGroup && !known.has(chat) && !firstRun // 新进的群只要最近 24 小时
-  for (const m of await unread(chat)) {
-    const sender = m.sender?.id ?? ''
-    const skip = firstRun || m.deleted || sender === me || m.msg_type === 'system'
-      || (fresh && (m.create_time ?? '') < dayAgo())
-    if (!skip) {
-      if (ALLOW.has(sender)) accept(m, chat, isGroup)
-      else log(`丢弃 ${m.message_id}：发送者 ${sender} 不在白名单（会话 ${chat}）`)
-    }
-    markSeen(m.message_id) // 入队落盘之后才记，崩在中间只会重收不会漏
+/** 一条消息进门：放行判断和已读记录只在这里；事件和补漏都走这里，已读过的不再处理 */
+function admit(m, chat, isGroup, old) {
+  if (seen.has(m.message_id)) return
+  const sender = m.sender?.id ?? ''
+  if (m.deleted || eventRecalled.has(m.message_id)) log(`跳过 ${m.message_id}：已撤回，创建→发现 ${ago(m.create_ms)}ms`)
+  const skip = old || m.deleted || eventRecalled.has(m.message_id) || sender === me || m.msg_type === 'system'
+  if (!skip) {
+    if (ALLOW.has(sender)) accept(m, chat, isGroup)
+    else log(`丢弃 ${m.message_id}：发送者 ${sender} 不在白名单（会话 ${chat}）`)
   }
+  markSeen(m.message_id) // 入队落盘之后才记，崩在中间只会重收不会漏
+}
+
+/** 事件到了但没能入队的消息：message_id → { chat, tries }，补拉直到拉到 */
+const missing = new Map()
+const MISSING_TRIES = 5
+
+async function catchUpChat(chat, isGroup, loud) {
+  const fresh = isGroup && !known.has(chat) && !firstRun // 新进的群只要最近 24 小时
+  const begin = Date.now()
+  if (loud) log(`拉取开始 ${chat}`)
+  const rows = await unread(chat)
+  if (loud || rows.length) log(`拉取结束 ${chat}：${Date.now() - begin}ms，新消息 ${rows.length} 条 ${rows.map(m => m.message_id).join(' ')}`)
+  for (const m of rows) admit(m, chat, isGroup, firstRun || (fresh && (m.create_time ?? '') < dayAgo()))
+  for (const [id, w] of missing) {
+    if (w.chat !== chat) continue
+    if (seen.has(id) || ++w.tries >= MISSING_TRIES) {
+      missing.delete(id)
+      if (!seen.has(id)) log(`放弃补拉 ${id}：拉了 ${w.tries} 次列表里都没有，等全量补漏`)
+    } else throw new Error(`列表里还没有 ${id}`)
+  }
+}
+
+/** 事件直入：发送者对得上白名单就用事件内容；对不上或缺字段，按 get 到的发送者判；失败立即补拉这个会话 */
+async function onEvent({ chat, chatType, message: m }) {
+  if (!m?.message_id) return schedule(chat)
+  const id = m.message_id
+  if (seen.has(id)) return
+  const isGroup = chatType !== 'p2p'
+  try {
+    if (ALLOW.has(m.sender?.id)) admit(m, chat, isGroup)
+    else {
+      const begin = Date.now()
+      const got = await feishu.getMessage(id)
+      if (!got) throw new Error('查不到这条消息')
+      log(`get 确认 ${id}：${Date.now() - begin}ms，发送者 ${got.sender?.id}`)
+      if (got.content !== m.content) log(`事件内容和 get 不一致 ${id}：类型 ${got.msg_type}，长度 ${m.content.length} / ${got.content.length}`)
+      admit(got, chat, isGroup)
+    }
+  } catch (e) {
+    log(`事件入队失败 ${id}，立即补拉：${e.message}`)
+    if (!seen.has(id)) missing.set(id, { chat, tries: 0 })
+  }
+  schedule(chat) // 入队不等它；顺带补上这个会话里没来事件的消息
 }
 
 async function catchUp(only) {
   const gs = only ? [] : await feishu.listChats()
   const chats = only ? [only] : [...gs, ...dmChats]
-  for (const chat of chats) await catchUpChat(chat, !dmChats.has(chat))
+  const begin = Date.now()
+  for (const chat of chats) await catchUpChat(chat, !dmChats.has(chat), Boolean(only))
+  if (!only) log(`全量补漏结束：${chats.length} 个会话，${Date.now() - begin}ms`)
   if (gs.length) {
     gs.forEach(g => known.add(g))
     writeFileSync(P.known, [...known].sort().join('\n'))
@@ -526,12 +590,15 @@ async function catchUp(only) {
 let tail = Promise.resolve()
 let retryWait = RETRY_MIN_MS
 const pending = new Set()
+const QUEUE_LOG_MS = 100
 function schedule(only) {
   const key = only ?? '*'
   if (pending.has(key) || pending.has('*')) return tail
   pending.add(key)
+  const asked = Date.now()
   tail = tail.then(async () => {
     pending.delete(key)
+    if (Date.now() - asked >= QUEUE_LOG_MS) log(`补漏 ${key} 排队 ${Date.now() - asked}ms`)
     await catchUp(only)
     retryWait = RETRY_MIN_MS
   }).catch(e => {
@@ -703,15 +770,17 @@ server.listen(P.sock, async () => {
       log('长连接已连上')
       schedule() // 补上断线和启动空档
     },
-    onMessage: ({ chat, chatType }) => {
+    onMessage: ev => {
+      const { chat, chatType, message, eventMs } = ev
+      log(`事件到达 ${message?.message_id}：创建→到达 ${ago(message?.create_ms)}ms，事件时间→到达 ${ago(eventMs)}ms，发送者 ${message?.sender?.id}`)
       if (chatType === 'p2p' && !dmChats.has(chat)) {
         dmChats.add(chat)
         appendFileSync(P.dms, `${chat}\n`)
       }
-      schedule(chat)
+      onEvent(ev)
     },
-    onRecall: id => {
-      log(`收到撤回事件 ${id}`)
+    onRecall: (id, { recallMs, eventMs } = {}) => {
+      log(`收到撤回事件 ${id}：撤回→到达 ${ago(recallMs)}ms，事件时间→到达 ${ago(eventMs)}ms`)
       eventRecalled.add(id)
       onRecall(id)
     },

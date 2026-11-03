@@ -174,13 +174,14 @@ test('「停」杀当前前台工具，不碰别的子进程', async () => {
   } finally { r.close() }
 })
 
-test('排队中撤回不送；送达后撤回自动停并发作废说明', () => rig(async r => {
+test('排队中撤回只撤下；处理中撤回打断这一轮，不丢队列、不暂停定时', () => rig(async r => {
   r.hook('UserPromptSubmit')
   r.add(msg('om_q'))
   await until(() => r.file('reactions.txt').includes('om_q GLANCE'), '排队')
   r.messages[0].deleted = true
   r.write()
   await until(() => r.log().includes('排队中撤回 om_q'), '撤回')
+  await until(() => r.file('sent.txt').includes('om_q 已从队列撤下'), '回执')
   r.hook('Stop')
   await sleep(200)
   assert.equal(r.pushes.length, 0)
@@ -188,12 +189,106 @@ test('排队中撤回不送；送达后撤回自动停并发作废说明', () =>
   r.add(msg('om_d'))
   await until(() => r.pushes.length === 1, '送达')
   await until(() => r.file('reactions.txt').includes('om_d OneSecond'), '处理中')
-  r.messages[1].deleted = true
-  r.write()
-  await until(() => r.file('sent.txt').includes('已停'), '自动停')
+  r.add(msg('om_wait'))
+  await until(() => r.file('reactions.txt').includes('om_wait GLANCE'), '后一条排队')
+  writeFileSync(join(r.dir, 'recall'), 'om_d')
+  await until(() => r.file('sent.txt').includes('om_d 已撤回，正在处理它的这一轮已打断'), '打断回执')
+  assert.match(r.hook('PreToolUse', { tool_name: 'Bash' }).stdout, /"permissionDecision":"deny"/)
   r.hook('Stop')
-  await until(() => r.pushes.length === 2, '作废说明')
+  await until(() => r.pushes.length === 2, '作废说明和排队消息')
   assert.match(r.pushes[1].content, /om_d 已撤回、作废/)
+  assert.match(r.pushes[1].content, /正文 om_wait/)
+  assert.doesNotMatch(r.file('sent.txt'), /已停/)
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '没暂停' })
+  await until(() => r.pushes.length === 3, '定时照常')
+}))
+
+test('闲时撤回已处理完的消息：只作废，不打断、不暂停定时', () => rig(async r => {
+  r.add(msg('om_done'))
+  await until(() => r.pushes.length === 1, '送达')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  writeFileSync(join(r.dir, 'recall'), 'om_done')
+  await until(() => r.file('sent.txt').includes('om_done 已作废'), '回执')
+  await until(() => r.pushes.length === 2, '作废说明')
+  assert.match(r.pushes[1].content, /那一轮已经结束/)
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '没暂停' })
+  await until(() => r.pushes.length === 3, '定时照常')
+}))
+
+const event = (r, m, senderId) => writeFileSync(join(r.dir, 'event'), JSON.stringify({
+  chat: 'oc_group', message: { ...m, sender: { id: senderId, sender_type: 'user' } },
+}))
+
+test('事件直入：发送者在白名单就用事件内容，不调 get，顺带补漏同会话漏掉的消息', () => rig(async r => {
+  event(r, msg('om_ev'), 'ou_ok')
+  await until(() => r.pushes.length === 1, '送达')
+  assert.equal(r.pushes[0].content, '正文 om_ev')
+  assert.equal(r.file('get.log'), '')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  r.messages.push(msg('om_noevent'))
+  r.write()
+  event(r, msg('om_ev2'), 'ou_ok')
+  await until(() => r.pushes.length === 2, '第二条')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  await until(() => r.pushes.map(p => p.content).join().includes('om_noevent'), '没事件的那条也补上')
+}))
+
+test('事件发送者对不上白名单：按 get 到的发送者判，白名单外照样丢弃', () => rig(async r => {
+  r.messages.push(msg('om_bad', 'ou_bad'))
+  r.write()
+  event(r, msg('om_bad'), 'ou_open_of_bad')
+  await until(() => r.log().includes('丢弃 om_bad'), '丢弃')
+  r.messages.push(msg('om_bot', 'cli_lead'))
+  r.write()
+  event(r, msg('om_bot'), 'ou_open_of_bot')
+  await until(() => r.pushes.length === 1, '送达')
+  assert.match(r.pushes[0].content, /om_bot/)
+  assert.equal(r.file('get.log'), 'om_bad\nom_bot\n')
+  assert.match(r.file('cli_me-seen.txt'), /om_bad/)
+  await sleep(100)
+  assert.equal(r.pushes.length, 1)
+}))
+
+test('事件发送者缺字段：get 拿到白名单外的不放行', () => rig(async r => {
+  r.messages.push(msg('om_x', 'ou_bad'))
+  r.write()
+  event(r, msg('om_x'), undefined)
+  await until(() => r.log().includes('丢弃 om_x'), '丢弃')
+  assert.equal(r.pushes.length, 0)
+}))
+
+test('事件入队失败立即补拉；列表暂时没有时继续补拉到拿到', () => rig(async r => {
+  writeFileSync(join(r.dir, 'get-fail'), '')
+  event(r, msg('om_late', 'cli_lead'), 'ou_bot')
+  await until(() => r.log().includes('事件入队失败 om_late'), '失败')
+  await until(() => r.log().includes('列表里还没有 om_late'), '第一次补拉')
+  r.messages.push(msg('om_late', 'cli_lead'))
+  r.write()
+  await until(() => r.pushes.length === 1, '补拉送达')
+}, { retrySec: 0.05 }))
+
+test('事件和补漏都见到同一条只送一次', () => rig(async r => {
+  event(r, msg('om_twice'), 'ou_ok')
+  await until(() => r.pushes.length === 1, '送达')
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
+  r.add(msg('om_twice'))
+  await until(() => r.log().includes('拉取结束'), '补漏')
+  await sleep(100)
+  assert.equal(r.pushes.length, 1)
+}))
+
+test('事件直入走同一套「停」', () => rig(async r => {
+  r.hook('UserPromptSubmit')
+  event(r, msg('om_stop', 'ou_ok', { content: '停' }), 'ou_ok')
+  await until(() => r.file('sent.txt').includes('已停'), '回执')
 }))
 
 test('常驻进程被杀后重启：队列不丢、不重复', async () => {
@@ -398,13 +493,14 @@ test('定时：等进程结束，常驻进程重启不丢', async () => {
   } finally { job.kill('SIGKILL'); r.close() }
 })
 
-test('定时：送达后撤回的作废说明不解除暂停', () => rig(async r => {
+test('定时：「停」的暂停不被撤回的作废说明解除', () => rig(async r => {
   r.add(msg('om_d'))
   await until(() => r.pushes.length === 1, '送达')
   r.hook('UserPromptSubmit')
-  writeFileSync(join(r.dir, 'recall'), 'om_d')
-  await until(() => r.file('sent.txt').includes('已停'), '自动停')
   r.hook('Stop')
+  r.add(msg('om_stop', 'ou_ok', { content: '停' }))
+  await until(() => r.file('sent.txt').includes('已停'), '停')
+  writeFileSync(join(r.dir, 'recall'), 'om_d')
   await until(() => r.pushes.length === 2, '作废说明')
   r.hook('UserPromptSubmit')
   r.hook('Stop')

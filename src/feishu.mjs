@@ -41,7 +41,16 @@ const normal = m => ({
   deleted: Boolean(m.deleted),
   content: formatContent(m.msg_type, m.body?.content),
   create_time: stamp(m.create_time),
+  create_ms: Number(m.create_time),
   sender: { id: m.sender?.id ?? '', sender_type: m.sender?.sender_type ?? '', name: m.sender?.name ?? '' },
+})
+
+/** 收消息事件 → 和列表接口同样的消息结构。事件里的发送者只有 open_id，机器人也一样，没有 cli_ 开头的 app id，也没有名字 */
+export const fromEvent = ({ message: m, sender: s }) => normal({
+  ...m,
+  msg_type: m.message_type,
+  body: { content: m.content },
+  sender: { id: s?.sender_id?.open_id ?? '', sender_type: s?.sender_type ?? '' },
 })
 
 /** 网络错误重试；发消息带同一个 uuid，服务端去重，不会发两条 */
@@ -115,11 +124,16 @@ export function connect(cfg, log) {
     async pin(id) {
       ok(await client.im.pin.create({ data: { message_id: id } }))
     },
-    /** handlers: onConnected()、onMessage({ chat, chatType })、onRecall(messageId) */
+    /** handlers: onConnected()、onMessage({ chat, chatType, message, eventMs })、onRecall(messageId, { recallMs, eventMs }) */
     listen(handlers) {
       const dispatcher = new lark.EventDispatcher({}).register({
-        'im.message.receive_v1': async e => handlers.onMessage({ chat: e.message.chat_id, chatType: e.message.chat_type }),
-        'im.message.recalled_v1': async e => handlers.onRecall(e.message_id),
+        'im.message.receive_v1': async e => handlers.onMessage({
+          chat: e.message.chat_id,
+          chatType: e.message.chat_type,
+          message: fromEvent(e),
+          eventMs: Number(e.create_time),
+        }),
+        'im.message.recalled_v1': async e => handlers.onRecall(e.message_id, { recallMs: Number(e.recall_time), eventMs: Number(e.create_time) }),
       })
       const ws = new lark.WSClient({
         ...base,

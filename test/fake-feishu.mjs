@@ -1,4 +1,4 @@
-// 假飞书：消息来自 $FAKE/messages.json；$FAKE/fire 触发收消息事件，$FAKE/recall 触发撤回事件；发出去的动作记到文件
+// 假飞书：消息来自 $FAKE/messages.json；$FAKE/fire 触发不带内容的事件，$FAKE/event 触发带内容的事件（{ chat, message }），$FAKE/get-fail 让 get 失败，$FAKE/recall 触发撤回事件；发出去的动作记到文件
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 
 const dir = process.env.FAKE
@@ -20,7 +20,11 @@ export function connect() {
       }
       return { messages: all().filter(m => m.chat_id === chat).reverse(), hasMore: false }
     },
-    getMessage: async id => all().find(m => m.message_id === id) ?? null,
+    async getMessage(id) {
+      appendFileSync(`${dir}/get.log`, `${id}\n`)
+      if (existsSync(`${dir}/get-fail`)) throw new Error('EOF')
+      return all().find(m => m.message_id === id) ?? null
+    },
     async sendText(chat, text) {
       appendFileSync(`${dir}/sent.txt`, `${chat}|${text}\n`)
       return 'om_sent'
@@ -44,6 +48,11 @@ export function connect() {
           const chat = readFileSync(`${dir}/fire`, 'utf8').trim()
           rmSync(`${dir}/fire`)
           h.onMessage({ chat, chatType: 'group' })
+        }
+        if (existsSync(`${dir}/event`)) {
+          const ev = JSON.parse(readFileSync(`${dir}/event`, 'utf8'))
+          rmSync(`${dir}/event`)
+          h.onMessage({ chatType: 'group', ...ev })
         }
         if (existsSync(`${dir}/recall`)) {
           const id = readFileSync(`${dir}/recall`, 'utf8').trim()
