@@ -542,28 +542,61 @@ async function catchUpChat(chat, isGroup, loud) {
   const rows = await unread(chat)
   if (loud || rows.length) log(`拉取结束 ${chat}：${Date.now() - begin}ms，新消息 ${rows.length} 条 ${rows.map(m => m.message_id).join(' ')}`)
   for (const m of rows) admit(m, chat, isGroup, firstRun || (fresh && (m.create_time ?? '') < dayAgo()))
+  let again = 0
   for (const [id, w] of missing) {
     if (w.chat !== chat) continue
     if (seen.has(id) || ++w.tries >= MISSING_TRIES) {
       missing.delete(id)
       if (!seen.has(id)) log(`放弃补拉 ${id}：拉了 ${w.tries} 次列表里都没有，等全量补漏`)
-    } else throw new Error(`列表里还没有 ${id}`)
+    } else {
+      log(`列表里还没有 ${id}，单独重拉这个会话`)
+      again = Math.max(again, w.tries)
+    }
   }
+  if (again) retryChat(chat, again)
 }
 
-/** 事件直入：发送者对得上白名单就用事件内容；对不上或缺字段，按 get 到的发送者判；失败立即补拉这个会话 */
+/** 只给这一个会话排重试，不中断全量补漏里的其他会话 */
+const chatRetry = new Set()
+function retryChat(chat, tries) {
+  if (chatRetry.has(chat)) return
+  chatRetry.add(chat)
+  setTimeout(() => {
+    chatRetry.delete(chat)
+    schedule(chat)
+  }, Math.min(RETRY_MIN_MS * 2 ** (tries - 1), RETRY_MAX_MS)).unref()
+}
+
+/** 事件里的 open_id → get 确认过的发送者 id；认过一次的发送者以后不再 get，白名单外的也直接丢 */
+const SENDER_CACHE_MAX = 1000
+function senderOf(openId) {
+  if (!openId) return ''
+  return ALLOW.has(openId) ? openId : S.senderIds?.[openId] ?? ''
+}
+function rememberSender(openId, id) {
+  if (!openId || !id || S.senderIds?.[openId] === id) return
+  S.senderIds ??= {}
+  S.senderIds[openId] = id
+  const keys = Object.keys(S.senderIds)
+  if (keys.length > SENDER_CACHE_MAX) delete S.senderIds[keys[0]]
+  save()
+}
+
+/** 事件直入：发送者已知（在白名单或 get 认过）就用事件内容判；没见过或缺字段，按 get 到的发送者判；失败立即补拉这个会话 */
 async function onEvent({ chat, chatType, message: m }) {
   if (!m?.message_id) return schedule(chat)
   const id = m.message_id
   if (seen.has(id)) return
   const isGroup = chatType !== 'p2p'
   try {
-    if (ALLOW.has(m.sender?.id)) admit(m, chat, isGroup)
+    const known = senderOf(m.sender?.id)
+    if (known) admit({ ...m, sender: { ...m.sender, id: known } }, chat, isGroup)
     else {
       const begin = Date.now()
       const got = await feishu.getMessage(id)
       if (!got) throw new Error('查不到这条消息')
       log(`get 确认 ${id}：${Date.now() - begin}ms，发送者 ${got.sender?.id}`)
+      rememberSender(m.sender?.id, got.sender?.id)
       if (got.content !== m.content) log(`事件内容和 get 不一致 ${id}：类型 ${got.msg_type}，长度 ${m.content.length} / ${got.content.length}`)
       admit(got, chat, isGroup)
     }

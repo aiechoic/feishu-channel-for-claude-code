@@ -256,6 +256,37 @@ test('事件发送者对不上白名单：按 get 到的发送者判，白名单
   assert.equal(r.pushes.length, 1)
 }))
 
+test('认过的发送者不再 get：白名单里的直接入队，白名单外的直接丢，常驻进程重启后还记得', async () => {
+  const r = new Rig({ recallPollSec: 0 }) // 撤回轮询也调 get，关掉才数得准
+  try {
+    await r.startDaemon()
+    await r.bridge()
+    r.messages.push(msg('om_b1', 'cli_lead'))
+    r.write()
+    event(r, msg('om_b1'), 'ou_open_of_bot')
+    await until(() => r.pushes.length === 1, '第一条走 get')
+    r.hook('UserPromptSubmit')
+    r.hook('Stop')
+    r.messages.push(msg('om_x1', 'ou_bad'))
+    r.write()
+    event(r, msg('om_x1'), 'ou_open_of_bad')
+    await until(() => r.log().includes('丢弃 om_x1'), '白名单外第一条走 get')
+    r.daemon.kill('SIGKILL')
+    await r.startDaemon()
+    r.link.destroy()
+    await until(() => r.log().split('长连接已连上').length > 2, '重启完成')
+    await r.bridge()
+    event(r, msg('om_b2'), 'ou_open_of_bot')
+    await until(() => r.pushes.length === 2, '第二条直接入队')
+    assert.equal(r.pushes[1].meta.sender_id, 'cli_lead')
+    event(r, msg('om_x2'), 'ou_open_of_bad')
+    await until(() => r.log().includes('丢弃 om_x2'), '白名单外第二条直接丢')
+    assert.equal(r.file('get.log'), 'om_b1\nom_x1\n')
+  } finally {
+    r.close()
+  }
+})
+
 test('事件发送者缺字段：get 拿到白名单外的不放行', () => rig(async r => {
   r.messages.push(msg('om_x', 'ou_bad'))
   r.write()
@@ -268,7 +299,8 @@ test('事件入队失败立即补拉；列表暂时没有时继续补拉到拿�
   writeFileSync(join(r.dir, 'get-fail'), '')
   event(r, msg('om_late', 'cli_lead'), 'ou_bot')
   await until(() => r.log().includes('事件入队失败 om_late'), '失败')
-  await until(() => r.log().includes('列表里还没有 om_late'), '第一次补拉')
+  await until(() => r.log().includes('列表里还没有 om_late，单独重拉这个会话'), '第一次补拉')
+  assert.doesNotMatch(r.log(), /补漏失败/)
   r.messages.push(msg('om_late', 'cli_lead'))
   r.write()
   await until(() => r.pushes.length === 1, '补拉送达')
