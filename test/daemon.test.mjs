@@ -103,24 +103,59 @@ test('闲时直接送达，白名单外丢弃，自己发的跳过', () => rig(a
   await until(() => r.file('reactions.txt').includes('om_1 CheckMark'), '完成表情')
 }))
 
-test('忙时只进队列，Stop 后合并成一条', () => rig(async r => {
+test('忙时白名单消息立刻送出，不等 Stop；白名单外照样丢；Stop 后打完成表情', () => rig(async r => {
   r.hook('UserPromptSubmit')
   await until(() => r.log().includes('标忙'), '标忙')
-  r.add(msg('om_1'), msg('om_2'))
-  await until(() => r.file('reactions.txt').includes('om_2 GLANCE'), '排队表情')
-  r.add(msg('om_3'))
-  await until(() => r.file('reactions.txt').includes('om_3 GLANCE'), '排队表情')
-  assert.equal(r.pushes.length, 0)
+  r.add(msg('om_1'), msg('om_bad', 'ou_bad'))
+  await until(() => r.pushes.length === 1, '忙时送达')
+  assert.equal(r.pushes[0].meta.message_id, 'om_1')
+  assert.equal(r.pushes[0].meta.retry, undefined)
+  assert.match(r.log(), /忙时送出 1 条：om_1/)
+  assert.match(r.log(), /丢弃 om_bad/)
+  await until(() => r.file('reactions.txt').includes('om_1 OneSecond'), '处理中表情')
+  assert.doesNotMatch(r.file('reactions.txt'), /om_1 GLANCE/)
+  r.add(msg('om_2'))
+  await until(() => r.pushes.length === 2, '第二条忙时送达')
+  r.hook('PostToolUse', { tool_name: 'Bash' })
   r.hook('Stop')
-  await until(() => r.pushes.length === 1, '合并送达')
-  assert.equal(r.pushes[0].meta.message_id, 'om_1,om_2,om_3')
-  assert.equal(r.pushes[0].meta.merged, '3')
-  assert.match(r.pushes[0].content, /正文 om_1[\s\S]*正文 om_3/)
+  await until(() => r.file('reactions.txt').includes('om_2 CheckMark'), '完成表情')
+  assert.match(r.file('reactions.txt'), /om_1 CheckMark/)
+  await sleep(300)
+  assert.equal(r.pushes.length, 2, '忙时送过的 Stop 后不再送')
 }))
 
-test('忙但心跳超时按闲处理并送出排队消息', () => rig(async r => {
+test('忙时送出中到达的消息：确认后接着送，同一会话合并', async () => {
+  const r = new Rig()
+  try {
+    await r.startDaemon()
+    await r.bridge()
+    r.hook('UserPromptSubmit')
+    r.link.destroy() // 换一个不自动确认的桥
+    await until(() => r.log().includes('桥断开'), '桥断开')
+    const c = connect(join(r.dir, 'cli_me.sock'))
+    const got = []
+    createInterface({ input: c }).on('line', l => { const m = JSON.parse(l); if (m.t === 'push') got.push(m) })
+    c.write(`${JSON.stringify({ t: 'hello', claudePid: 999999, bridgePid: 1 })}\n`)
+    await until(() => r.log().split('桥已连上').length === 3, '桥重连')
+    r.hook('UserPromptSubmit')
+    r.add(msg('om_1'))
+    await until(() => got.length === 1, '第一条送出')
+    r.add(msg('om_2'), msg('om_3'))
+    await until(() => r.file('reactions.txt').includes('om_3 GLANCE'), '送出中排队')
+    assert.equal(got.length, 1)
+    c.write(`${JSON.stringify({ t: 'ack', pushId: got[0].pushId })}\n`)
+    await until(() => got.length === 2, '确认后接着送')
+    assert.equal(got[1].meta.message_id, 'om_2,om_3')
+    assert.equal(got[1].meta.merged, '2')
+    c.destroy()
+  } finally { r.close() }
+})
+
+test('忙但心跳超时按闲处理并送出排队的定时', () => rig(async r => {
   r.hook('UserPromptSubmit')
-  r.add(msg('om_1'))
+  await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '超时后送' })
+  await until(() => r.log().includes('定时 s1 触发'), '到点')
+  assert.equal(r.pushes.length, 0)
   await until(() => r.log().includes('标闲：心跳超时'), '超时标闲')
   await until(() => r.pushes.length === 1, '送达')
 }, { busyTimeoutSec: 0.1 }))
@@ -137,24 +172,29 @@ test('会话离线时排队，新会话连上后送出', async () => {
   } finally { r.close() }
 })
 
-test('「停」：清空队列、写标记、拦工具、回执；句子里带停字不触发', () => rig(async r => {
+test('「停」：清空队列、写标记、拦工具、回执；句子里带停字不触发；停下前到的新消息等闲再送', () => rig(async r => {
   r.hook('UserPromptSubmit')
-  r.add(msg('om_1'), msg('om_no', 'ou_ok', { content: '先别停' }))
-  await until(() => r.file('reactions.txt').includes('om_no GLANCE'), '排队')
+  await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '排队的定时' })
+  await until(() => r.log().includes('定时 s1 触发'), '定时排队')
+  r.add(msg('om_no', 'ou_ok', { content: '先别停' }))
+  await until(() => r.pushes.length === 1, '带停字的句子忙时照常送')
   r.add(msg('om_bad', 'ou_bad', { content: '停' }))
   await until(() => r.log().includes('丢弃 om_bad'), '白名单外的停被丢弃')
   assert.ok(!existsSync(join(r.dir, 'cli_me.stop')))
   r.add(msg('om_stop', 'ou_ok', { content: '停' }))
   await until(() => existsSync(join(r.dir, 'cli_me.stop')), '停止标记')
-  await until(() => r.file('sent.txt').includes('已停，丢了 2 条'), '回执')
+  await until(() => r.file('sent.txt').includes('已停，丢了 1 条（含定时 s1）'), '回执')
+  await until(() => r.file('reactions.txt').includes('om_no CrossMark'), '忙时送过的也标已停')
   const out = r.hook('PreToolUse', { tool_name: 'Bash' })
   assert.equal(JSON.parse(out.stdout).continue, false)
   assert.equal(JSON.parse(out.stdout).hookSpecificOutput.permissionDecision, 'deny')
+  r.add(msg('om_new'))
+  await until(() => r.file('reactions.txt').includes('om_new GLANCE'), '停下前到的新消息排队')
+  assert.equal(r.pushes.length, 1, '停止标记在时不往要结束的这一轮里送')
   r.hook('Stop')
   await until(() => !existsSync(join(r.dir, 'cli_me.stop')), '标记清掉')
-  r.add(msg('om_new'))
-  await until(() => r.pushes.length === 1, '新指令送达')
-  assert.equal(r.pushes[0].meta.message_id, 'om_new')
+  await until(() => r.pushes.length === 2, '闲后送达')
+  assert.equal(r.pushes[1].meta.message_id, 'om_new')
 }))
 
 test('「停」杀当前前台工具，不碰别的子进程', async () => {
@@ -174,35 +214,53 @@ test('「停」杀当前前台工具，不碰别的子进程', async () => {
   } finally { r.close() }
 })
 
-test('排队中撤回只撤下；处理中撤回打断这一轮，不丢队列、不暂停定时', () => rig(async r => {
-  r.hook('UserPromptSubmit')
-  r.add(msg('om_q'))
-  await until(() => r.file('reactions.txt').includes('om_q GLANCE'), '排队')
-  r.messages[0].deleted = true
-  r.write()
-  await until(() => r.log().includes('排队中撤回 om_q'), '撤回')
-  await until(() => r.file('sent.txt').includes('om_q 已从队列撤下'), '回执')
-  r.hook('Stop')
-  await sleep(200)
-  assert.equal(r.pushes.length, 0)
+test('排队中撤回只撤下；处理中撤回打断这一轮，同一轮忙时送达的照样要处理，不暂停定时', async () => {
+  const r = new Rig()
+  try {
+    await r.startDaemon() // 先不接桥：离线时消息排队
+    r.add(msg('om_q'))
+    await until(() => r.file('reactions.txt').includes('om_q GLANCE'), '排队')
+    r.messages[0].deleted = true
+    r.write()
+    await until(() => r.log().includes('排队中撤回 om_q'), '撤回')
+    await until(() => r.file('sent.txt').includes('om_q 已从队列撤下'), '回执')
+    await r.bridge()
+    await sleep(200)
+    assert.equal(r.pushes.length, 0)
 
-  r.add(msg('om_d'))
-  await until(() => r.pushes.length === 1, '送达')
-  await until(() => r.file('reactions.txt').includes('om_d OneSecond'), '处理中')
-  r.add(msg('om_wait'))
-  await until(() => r.file('reactions.txt').includes('om_wait GLANCE'), '后一条排队')
-  writeFileSync(join(r.dir, 'recall'), 'om_d')
-  await until(() => r.file('sent.txt').includes('om_d 已撤回，正在处理它的这一轮已打断'), '打断回执')
-  assert.match(r.hook('PreToolUse', { tool_name: 'Bash' }).stdout, /"permissionDecision":"deny"/)
-  r.hook('Stop')
-  await until(() => r.pushes.length === 2, '作废说明和排队消息')
-  assert.match(r.pushes[1].content, /om_d 已撤回、作废/)
-  assert.match(r.pushes[1].content, /正文 om_wait/)
-  assert.doesNotMatch(r.file('sent.txt'), /已停/)
+    r.add(msg('om_d'))
+    await until(() => r.pushes.length === 1, '送达')
+    r.hook('UserPromptSubmit')
+    await until(() => r.file('reactions.txt').includes('om_d OneSecond'), '处理中')
+    r.add(msg('om_more'))
+    await until(() => r.pushes.length === 2, '补充忙时送达')
+    writeFileSync(join(r.dir, 'recall'), 'om_d')
+    await until(() => r.file('sent.txt').includes('om_d 已撤回，正在处理它的这一轮已打断'), '打断回执')
+    assert.match(r.hook('PreToolUse', { tool_name: 'Bash' }).stdout, /"permissionDecision":"deny"/)
+    r.hook('Stop')
+    await until(() => r.pushes.length === 3, '作废说明')
+    assert.match(r.pushes[2].content, /om_d 已撤回、作废.*同一轮的 om_more 没有撤回，仍要处理/)
+    assert.doesNotMatch(r.file('sent.txt'), /已停/)
+    r.hook('UserPromptSubmit')
+    r.hook('Stop')
+    await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '没暂停' })
+    await until(() => r.pushes.length === 4, '定时照常')
+  } finally { r.close() }
+})
+
+test('忙时送达的消息撤回：按处理中打断这一轮', () => rig(async r => {
   r.hook('UserPromptSubmit')
+  r.add(msg('om_b'))
+  await until(() => r.pushes.length === 1, '忙时送达')
+  writeFileSync(join(r.dir, 'recall'), 'om_b')
+  await until(() => r.file('sent.txt').includes('om_b 已撤回，正在处理它的这一轮已打断'), '打断回执')
+  assert.ok(existsSync(join(r.dir, 'cli_me.stop')))
+  r.add(msg('om_after'))
+  await until(() => r.file('reactions.txt').includes('om_after GLANCE'), '打断中到的排队')
+  assert.equal(r.pushes.length, 1)
   r.hook('Stop')
-  await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '没暂停' })
-  await until(() => r.pushes.length === 3, '定时照常')
+  await until(() => r.pushes.length === 2, '闲后送说明和新消息')
+  assert.match(r.pushes[1].content, /om_b 已撤回、作废[\s\S]*正文 om_after/)
 }))
 
 test('闲时撤回已处理完的消息：只作废，不打断、不暂停定时', () => rig(async r => {
@@ -326,12 +384,9 @@ test('事件直入走同一套「停」', () => rig(async r => {
 test('常驻进程被杀后重启：队列不丢、不重复', async () => {
   const r = new Rig()
   try {
-    await r.startDaemon()
-    await r.bridge()
-    r.hook('UserPromptSubmit')
+    await r.startDaemon() // 不接桥：消息留在队列里
     r.add(msg('om_1'))
     await until(() => r.file('cli_me-state.json').includes('om_1'), '入队')
-    r.link.destroy()
     r.daemon.kill('SIGKILL')
     r.messages.push(msg('om_2'))
     r.write()
@@ -401,13 +456,19 @@ test('送出后会话没唤醒：退回队列重发，唤醒后不再重发', ()
   await until(() => r.file('reactions.txt').includes('om_1 CheckMark'), '完成表情')
 }, { wakeTimeoutSec: 0.1 }))
 
-test('撤回事件：排队中的不送，比轮询先生效', () => rig(async r => {
-  r.hook('UserPromptSubmit')
-  r.add(msg('om_q'))
-  await until(() => r.file('reactions.txt').includes('om_q GLANCE'), '排队')
-  writeFileSync(join(r.dir, 'recall'), 'om_q')
-  await until(() => r.log().includes('排队中撤回 om_q'), '撤回事件')
-}, { recallPollSec: 0 }))
+test('撤回事件：排队中的不送，比轮询先生效', async () => {
+  const r = new Rig({ recallPollSec: 0 })
+  try {
+    await r.startDaemon()
+    r.add(msg('om_q'))
+    await until(() => r.file('reactions.txt').includes('om_q GLANCE'), '排队')
+    writeFileSync(join(r.dir, 'recall'), 'om_q')
+    await until(() => r.log().includes('排队中撤回 om_q'), '撤回事件')
+    await r.bridge()
+    await sleep(200)
+    assert.equal(r.pushes.length, 0)
+  } finally { r.close() }
+})
 
 const tool = (r, action, args) => new Promise(resolve => {
   const c = connect(join(r.dir, 'cli_me.sock'))
@@ -425,16 +486,19 @@ test('定时：闲时送达，一次性的触发后删除，卡片显示下一�
   assert.equal((await tool(r, 'list')).text, '没有定时')
 }))
 
-test('定时：忙时进队列和消息合并，「停」能清', () => rig(async r => {
+test('定时：忙时进队列等闲，消息忙时照送、不和它合并；「停」能清', () => rig(async r => {
   r.hook('UserPromptSubmit')
   await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 200).toISOString(), text: '提醒A' })
   await until(() => r.log().includes('定时 s1 触发'), '到点')
   r.add(msg('om_1'))
-  await until(() => r.file('reactions.txt').includes('om_1 GLANCE'), '排队')
+  await until(() => r.pushes.length === 1, '消息忙时送达')
+  assert.equal(r.pushes[0].meta.message_id, 'om_1')
+  assert.doesNotMatch(r.pushes[0].content, /提醒A/)
   r.hook('Stop')
-  await until(() => r.pushes.length === 1, '合并')
-  assert.equal(r.pushes[0].meta.merged, '2')
-  assert.match(r.pushes[0].content, /\[定时 s1[\s\S]*提醒A[\s\S]*正文 om_1/)
+  await until(() => r.pushes.length === 2, '定时闲后送达')
+  assert.match(r.pushes[1].content, /\[定时 s1\].*提醒A/)
+  r.hook('UserPromptSubmit')
+  r.hook('Stop')
 
   r.hook('UserPromptSubmit')
   await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 200).toISOString(), text: '提醒B' })

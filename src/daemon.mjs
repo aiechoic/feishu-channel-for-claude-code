@@ -6,6 +6,7 @@
  * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
  *   事件里的发送者对不上 allow 时（机器人只有 open_id），按 get 单条拿到的发送者再判一次。
  * 送：闲时把队列里同一会话的消息合并成一条，经桥（bridge.mjs）送出，桥确认后出队。
+ *   忙时白名单发送者的消息也立刻送，Claude Code 在下一次工具调用前后带进这一轮（标成外部内容）；说明、定时和停止标记在时等闲。
  *   会话没就绪时 Claude Code 会静默丢掉通知，所以送出后等到 hook 才算唤醒，等不到退回队列重发。
  * 忙闲：hook.mjs 上报。忙且心跳超时、且没有活着的工具进程时按闲处理。
  * 停：白名单发送者整条消息就是「停」时，清空队列、写停止标记、杀当前工具进程。
@@ -193,6 +194,7 @@ function onHook(h) {
       if (!systemWake) S.schedulesPaused = false
       rmSync(P.stopFlag, { force: true })
       setBusy(h.event)
+      deliver() // 停止标记清掉了，等着的消息可以忙时送
       break
     case 'PreToolUse':
       setBusy(h.event)
@@ -290,18 +292,26 @@ function clip(text) {
   return text.length <= CLIP ? text : `${text.slice(0, CLIP)} …[已截断，全文按 message_id 用 lark-cli 拉]`
 }
 
+/** 闲时：队首会话的全部排队（含说明、定时）合并送出，等 hook 确认唤醒。
+ * 忙时：只送白名单发送者的消息（队列里的消息都已过白名单），说明和定时等闲；停止标记在时（「停」或撤回打断中）也等闲 */
 function deliver() {
-  if (S.busy || !bridge || pushing || waking || !S.queue.length) return
-  const chat = S.queue[0].chat
-  const batch = S.queue.filter(m => m.chat === chat)
+  if (!bridge || pushing || waking || !S.queue.length) return
+  const busy = S.busy
+  if (busy && existsSync(P.stopFlag)) return
+  const pool = busy ? S.queue.filter(m => !m.notice) : S.queue
+  if (!pool.length) return
+  const chat = pool[0].chat
+  const batch = pool.filter(m => m.chat === chat)
   const first = batch[0]
   const ids = batch.filter(m => !m.notice).map(m => m.message_id)
   const content = batch.length === 1
     ? clip(first.content)
     : batch.map(m => `[${[m.label ?? m.message_id ?? '系统说明', m.sender_name, m.create_time].filter(Boolean).join(' ')}]\n${clip(m.content)}`).join('\n\n')
-  pushing = { batch, pushId: `${Date.now()}` }
-  rmSync(P.stopFlag, { force: true })
-  setBusy('送出消息')
+  pushing = { batch, busy, pushId: `${Date.now()}` }
+  if (!busy) {
+    rmSync(P.stopFlag, { force: true })
+    setBusy('送出消息')
+  }
   bridge.sock.write(`${JSON.stringify({
     t: 'push',
     pushId: pushing.pushId,
@@ -316,14 +326,14 @@ function deliver() {
       msg_type: first.msg_type ?? 'text',
       create_time: first.create_time ?? '',
       merged: String(batch.length),
-      ...(wakeTries ? { retry: String(wakeTries) } : {}),
+      ...(wakeTries && !busy ? { retry: String(wakeTries) } : {}),
     },
   })}\n`)
 }
 
 function onAck(pushId) {
   if (pushing?.pushId !== pushId) return
-  const { batch } = pushing
+  const { batch, busy } = pushing
   pushing = null
   const sent = new Set(batch)
   S.queue = S.queue.filter(m => !sent.has(m))
@@ -333,7 +343,15 @@ function onAck(pushId) {
     S.delivered[m.message_id] = { chat: m.chat, at: Date.now() }
     react(m.message_id, 'active')
   }
-  log(`已送出 ${batch.length} 条：${batch.map(m => (m.notice ? '说明' : `${m.message_id}（创建→送出 ${ago(m.createMs)}ms）`)).join(' ')}`)
+  log(`${busy ? '忙时送出' : '已送出'} ${batch.length} 条：${batch.map(m => (m.notice ? '说明' : `${m.message_id}（创建→送出 ${ago(m.createMs)}ms）`)).join(' ')}`)
+  if (busy) {
+    // 会话正在跑，Claude Code 在下一次工具调用前后把它带进这一轮，不用等唤醒；它是新指令，同样恢复「停」暂停的定时
+    S.schedulesPaused = false
+    save()
+    refreshCard()
+    deliver()
+    return
+  }
   save()
   refreshCard()
   const wait = Math.min(WAKE_TIMEOUT_MS * 2 ** wakeTries, WAKE_TIMEOUT_MAX_MS)
@@ -367,9 +385,9 @@ function enqueue(item) {
   S.queue.push(item)
   save()
   if (!item.notice) log(`入队 ${item.message_id}：创建→入队 ${ago(item.createMs)}ms，忙 ${S.busy}，桥 ${Boolean(bridge)}`)
-  if (!item.notice && (S.busy || !bridge || pushing)) react(item.message_id, 'queued')
-  refreshCard()
   deliver()
+  if (!item.notice && !pushing?.batch.includes(item)) react(item.message_id, 'queued')
+  refreshCard()
 }
 
 // ---------- 停和撤回 ----------
