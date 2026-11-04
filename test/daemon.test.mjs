@@ -172,7 +172,7 @@ test('会话离线时排队，新会话连上后送出', async () => {
   } finally { r.close() }
 })
 
-test('「停」：清空队列、写标记、拦工具、回执；句子里带停字不触发；停下前到的新消息等闲再送', () => rig(async r => {
+test('「停」：清空队列、写标记、拦工具、回执；句子里带停字不触发；停之前送出的补充进会话不解除；停下前到的新消息等闲再送', () => rig(async r => {
   r.hook('UserPromptSubmit')
   await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '排队的定时' })
   await until(() => r.log().includes('定时 s1 触发'), '定时排队')
@@ -185,6 +185,8 @@ test('「停」：清空队列、写标记、拦工具、回执；句子里带�
   await until(() => existsSync(join(r.dir, 'cli_me.stop')), '停止标记')
   await until(() => r.file('sent.txt').includes('已停，丢了 1 条（含定时 s1）'), '回执')
   await until(() => r.file('reactions.txt').includes('om_no CrossMark'), '忙时送过的也标已停')
+  r.hook('UserPromptSubmit') // 停之前忙时送出的 om_no 这时才进会话
+  assert.ok(existsSync(join(r.dir, 'cli_me.stop')), '停之前送出的补充进会话不清停止标记')
   const out = r.hook('PreToolUse', { tool_name: 'Bash' })
   assert.equal(JSON.parse(out.stdout).continue, false)
   assert.equal(JSON.parse(out.stdout).hookSpecificOutput.permissionDecision, 'deny')

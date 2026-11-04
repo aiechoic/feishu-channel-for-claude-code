@@ -191,6 +191,11 @@ function onHook(h) {
   woke() // 只在闲时送出，送出后的任何 hook 都说明会话收到了
   switch (h.event) {
     case 'UserPromptSubmit':
+      // 停止标记在、会话还忙：是「停」或撤回打断之前忙时送出的补充这时才进会话，不算新指令，标记留着让这一轮结束
+      if (S.busy && existsSync(P.stopFlag)) {
+        setBusy(h.event)
+        break
+      }
       if (!systemWake) S.schedulesPaused = false
       rmSync(P.stopFlag, { force: true })
       setBusy(h.event)
