@@ -15,16 +15,17 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 | 文件 | 作用 |
 | --- | --- |
 | `src/daemon.mjs` | 常驻进程：长连接、已读记录、队列、忙闲、停、撤回、定时、表情、状态卡片 |
-| `src/supervise.sh` | 外层循环：常驻进程退出后拉起，文件锁保证单份 |
+| `src/supervise.mjs` | 外层循环：常驻进程退出后拉起；占住一个本机端点保证同一状态目录只跑一份 |
 | `src/bridge.mjs` | MCP 桥（stdio）：只转发，启动时确保外层循环在跑 |
 | `src/hook.mjs` | Claude Code hook：上报忙闲和工具名，看到停止标记时结束这一轮 |
 | `src/feishu.mjs` | 飞书适配器，基于官方 Node SDK |
+| `src/proc.mjs` | 进程表：查子进程、杀进程树、取启动时刻；Linux 读 `/proc`，Windows 用 PowerShell 和 `taskkill` |
 
 会话关闭后常驻进程继续运行，消息和定时都留着，下次会话连上再送。
 
 ## 安装
 
-需要 Node 20+、Linux（用到 `/proc` 和 `flock`）。
+需要 Node 20+。支持 Linux 和 Windows（原生 Claude Code）。常驻进程、桥、hook 之间走本机端点：Linux 是状态目录里的 Unix socket，Windows 是命名管道 `\\.\pipe\feishu-channel-<appId>-<状态目录哈希>`。
 
 1. 在[飞书开放平台](https://open.feishu.cn/app)建自建应用，开机器人能力，事件订阅选**长连接**，订阅 `im.message.receive_v1`、`im.message.recalled_v1`，开通读写消息、表情回复、置顶、读群列表的权限，发布版本，把机器人拉进群。
 2. 安装：
@@ -39,6 +40,26 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 3. 自检：`node bin/doctor.mjs`，按功能列出缺的权限和影响。核心权限缺失时退出码 1，常驻进程也不会启动。事件订阅没有查询接口，要照输出手动核对。
 4. 运行 `setup.mjs` 打印的命令。启动时要确认一次开发 channel。`-p` 模式下不生效。
+
+生成的 hook 命令是 `node "<仓库>/src/hook.mjs" "<配置文件>"`，配置文件当参数传，sh、cmd、PowerShell 都能跑。
+
+### Windows
+
+要 Node 20+（`node` 在 PATH 里）和 Git for Windows（Claude Code 的 Bash 工具用 Git Bash）。PowerShell 里：
+
+```powershell
+git clone <本仓库>; cd feishu-channel-for-claude-code
+npm ci --ignore-scripts
+mkdir $HOME\.config\feishu-channel -Force
+copy config.example.json $HOME\.config\feishu-channel\config.json   # 然后填写；stateDir 不填就是 %USERPROFILE%\.local\state\feishu-channel
+node bin\setup.mjs
+```
+
+其余同上。和 Linux 的差别：
+
+- 「停」杀前台工具用 `taskkill /T /F`（Windows 没有让工具收尾的温和信号）；找工具进程用 PowerShell 的 `Get-CimInstance Win32_Process`，每次约 1 秒，只在「停」、撤回打断、忙时心跳超时时查。
+- `process` 定时按 Windows 的进程创建时间认进程。
+- 外层循环和常驻进程是无窗口的分离进程，关掉终端不影响；要停就在任务管理器里结束 `node`（命令行含 `supervise.mjs` 和 `daemon.mjs` 的两个）。
 
 用 `--mcp-config` 和 `--settings` 而不是项目配置：没带 channel 参数的会话不该接这个桥，也不该跑这些 hook。
 
@@ -143,8 +164,8 @@ print(f'本机领先 {lo:.3f}..{hi:.3f} 秒')
 npm test
 ```
 
-用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。
+用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。GitHub Actions 在 ubuntu 和 windows 上各跑一遍。「停」杀真实 bash 子进程那条只在 Linux / macOS 跑；Windows 的查表和杀树由 `test/proc.test.mjs` 用模拟的 PowerShell 输出覆盖。
 
 测过的 Claude Code 版本：2.1.316（真实飞书 + 真实会话）。
 
-真实环境验证过：闲时唤醒、忙时送达、忙时合并、停、撤回事件、定时（一次性、等进程、暂停后补发、离线补发）、常驻进程被杀后恢复。没有验证过：真实断网下的长连接重连（由官方 SDK 负责）、`daily` 和 `weekly` 到点触发（只有单测）。
+真实环境（Linux）验证过：闲时唤醒、忙时送达、忙时合并、停、撤回事件、定时（一次性、等进程、暂停后补发、离线补发）、常驻进程被杀后恢复。没有验证过：真实断网下的长连接重连（由官方 SDK 负责）、`daily` 和 `weekly` 到点触发（只有单测）、Windows 上的真实会话。

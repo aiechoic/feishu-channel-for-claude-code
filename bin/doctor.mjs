@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // 自检：node bin/doctor.mjs。核心权限缺失时退出码 1，其余只报告。
 import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { readConfig } from '../src/common.mjs'
 import { checkScopes, report } from '../src/doctor.mjs'
 
 const cfg = readConfig()
-const { connect } = await import(process.env.FEISHU_ADAPTER ?? '../src/feishu.mjs')
+// 绝对路径转成 file URL 再 import：Windows 的 C:\… 直接 import 会报错
+const { connect } = await import(process.env.FEISHU_ADAPTER ? pathToFileURL(process.env.FEISHU_ADAPTER).href : '../src/feishu.mjs')
 const expected = cfg.expectedScopesFile ? JSON.parse(readFileSync(cfg.expectedScopesFile, 'utf8')) : cfg.expectedScopes
 const f = connect(cfg, console.log)
 const granted = await f.grantedScopes()

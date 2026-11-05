@@ -16,7 +16,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { HERE, paths, readConfig } from './common.mjs'
 
 const P = paths(readConfig())
-const { sock, lock } = P
+const { sock } = P
 const REPLY_TIMEOUT = 40_000
 
 const mcp = new Server(
@@ -133,7 +133,7 @@ process.stdin.on('close', exit)
 
 mcp.oninitialized = () => {
   mkdirSync(P.dir, { recursive: true })
-  spawn('sh', [join(HERE, 'supervise.sh'), lock], { detached: true, stdio: 'ignore' }).unref()
+  spawn(process.execPath, [join(HERE, 'supervise.mjs')], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
   dial()
 }
 await mcp.connect(new StdioServerTransport())

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 飞书 channel 常驻进程：持有事件长连接、已读记录、消息队列、定时和忙闲状态，由 supervise.sh 负责重启。
+ * 飞书 channel 常驻进程：持有事件长连接、已读记录、消息队列、定时和忙闲状态，由 supervise.mjs 负责重启。
  *
  * 收：长连接事件带的内容直接入队；启动 / 连上时和定时全量补漏只补漏。以已读记录为准，不漏不重。
  * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
@@ -16,18 +16,22 @@
  * 配置字段见 config.example.json。环境变量 FEISHU_CHANNEL_CONFIG 换配置文件，FEISHU_ADAPTER 换飞书适配器（测试用）。
  */
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
 import { createInterface } from 'node:readline'
+import { pathToFileURL } from 'node:url'
 import { paths, readConfig } from './common.mjs'
 import { checkScopes } from './doctor.mjs'
+import proc, { SHELL_NAME } from './proc.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
 
 const cfg = readConfig()
 const P = paths(cfg)
 mkdirSync(P.dir, { recursive: true })
-const feishu = (await import(process.env.FEISHU_ADAPTER ?? './feishu.mjs')).connect(cfg, msg => log(msg))
+// 适配器路径转成 file URL 再 import：Windows 的绝对路径（C:\…）直接 import 会被当成 URL 协议报错
+const adapter = process.env.FEISHU_ADAPTER ? pathToFileURL(process.env.FEISHU_ADAPTER).href : './feishu.mjs'
+const feishu = (await import(adapter)).connect(cfg, msg => log(msg))
 const ALLOW = new Set(cfg.allow)
 const SWEEP_MS = (cfg.sweepSec ?? 600) * 1000
 const BUSY_TIMEOUT_MS = (cfg.busyTimeoutSec ?? 180) * 1000
@@ -231,51 +235,13 @@ function toolProcess() {
   const started = Object.values(S.inflight).filter(t => t.tool === 'Bash').map(t => t.at)
   if (!bridge || !started.length) return null
   const after = Math.min(...started) - 2000
-  const boot = Number(/^btime (\d+)/m.exec(readFileSync('/proc/stat', 'utf8'))[1]) * 1000
-  const shells = table().filter(p => p.ppid === bridge.claudePid && p.pid !== bridge.bridgePid
-    && /^(ba|z|da)?sh$/.test(p.comm) && boot + p.start * 10 >= after
-    && !readCmd(p.pid).includes('hook.mjs'))
-  return shells.sort((a, b) => b.start - a.start)[0]?.pid ?? null
-}
-
-function readCmd(pid) {
-  try {
-    return readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-  } catch {
-    return ''
-  }
-}
-
-function table() {
-  const rows = []
-  for (const name of readdirSync('/proc')) {
-    if (!/^\d+$/.test(name)) continue
-    try {
-      const stat = readFileSync(`/proc/${name}/stat`, 'utf8')
-      const close = stat.lastIndexOf(')')
-      const f = stat.slice(close + 2).split(' ')
-      rows.push({ pid: Number(name), comm: stat.slice(stat.indexOf('(') + 1, close), ppid: Number(f[1]), start: Number(f[19]) })
-    } catch {
-      // 进程刚退出
-    }
-  }
-  return rows
+  const shells = proc.children(bridge.claudePid).filter(p => p.pid !== bridge.bridgePid
+    && SHELL_NAME.test(p.name) && p.startMs >= after && !p.cmd.includes('hook.mjs'))
+  return shells.sort((a, b) => b.startMs - a.startMs)[0]?.pid ?? null
 }
 
 function killTree(root) {
-  const rows = table()
-  const tree = [root]
-  for (let i = 0; i < tree.length; i++) tree.push(...rows.filter(p => p.ppid === tree[i]).map(p => p.pid))
-  const send = sig => tree.forEach(pid => {
-    try {
-      process.kill(pid, sig)
-    } catch {
-      // 已退出
-    }
-  })
-  send('SIGTERM')
-  setTimeout(() => send('SIGKILL'), 2000).unref()
-  log(`已杀工具进程树 ${tree.join(' ')}`)
+  log(`已杀工具进程树 ${proc.killTree(root).join(' ')}`)
 }
 
 function watchdog() {
@@ -763,7 +729,7 @@ function onLine(sock, line) {
 }
 
 let stopping = false
-rmSync(P.sock, { force: true })
+if (!P.pipe) rmSync(P.sock, { force: true }) // Unix socket 文件会残留；Windows 命名管道随进程消失
 const server = createServer(sock => {
   sock.on('error', () => {})
   createInterface({ input: sock }).on('error', () => {}).on('line', line => {
@@ -816,7 +782,7 @@ process.on('uncaughtException', e => log(`uncaughtException: ${e}`))
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => shutdown(sig))
 
 server.listen(P.sock, async () => {
-  log(`常驻进程启动 pid=${process.pid}`)
+  log(`常驻进程启动 pid=${process.pid}，外层循环 ${process.ppid}`)
   await selfCheck()
   me = cfg.appId
   await schedule()

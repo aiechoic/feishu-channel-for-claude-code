@@ -11,9 +11,11 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { z } from 'zod'
+import { paths } from '../src/common.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
+const IS_WIN = process.platform === 'win32'
 
 const msg = (id, sender = 'ou_ok', extra = {}) => ({
   chat_id: 'oc_group', message_id: id, content: `正文 ${id}`, msg_type: 'text', create_time: '2026-11-01 10:00',
@@ -40,6 +42,7 @@ class Rig {
       cardDebounceSec: 0.1, statusChat: 'oc_group', ...extra,
     }))
     this.env = { ...process.env, FEISHU_CHANNEL_CONFIG: this.cfg, FEISHU_ADAPTER: join(HERE, 'fake-feishu.mjs'), FAKE: this.dir }
+    this.sock = paths({ appId: 'cli_me', stateDir: this.dir }).sock
     this.pushes = []
   }
 
@@ -54,8 +57,8 @@ class Rig {
 
   /** 假桥：claudePid 用给定值，自动确认推送 */
   async bridge(claudePid = 999999) {
-    await until(() => existsSync(join(this.dir, 'cli_me.sock')), 'socket')
-    const c = connect(join(this.dir, 'cli_me.sock'))
+    await until(() => this.file('cli_me.log').includes('常驻进程启动'), '端点就绪')
+    const c = connect(this.sock)
     createInterface({ input: c }).on('line', l => {
       const m = JSON.parse(l)
       if (m.t !== 'push') return
@@ -77,7 +80,8 @@ class Rig {
   close() {
     this.link?.destroy()
     this.daemon?.kill('SIGKILL')
-    rmSync(this.dir, { recursive: true, force: true })
+    // Windows 上刚杀掉的进程可能还占着日志文件，删目录要重试几次
+    rmSync(this.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }
 }
 
@@ -132,7 +136,7 @@ test('忙时送出中到达的消息：确认后接着送，同一会话合并',
     r.hook('UserPromptSubmit')
     r.link.destroy() // 换一个不自动确认的桥
     await until(() => r.log().includes('桥断开'), '桥断开')
-    const c = connect(join(r.dir, 'cli_me.sock'))
+    const c = connect(r.sock)
     const got = []
     createInterface({ input: c }).on('line', l => { const m = JSON.parse(l); if (m.t === 'push') got.push(m) })
     c.write(`${JSON.stringify({ t: 'hello', claudePid: 999999, bridgePid: 1 })}\n`)
@@ -199,7 +203,8 @@ test('「停」：清空队列、写标记、拦工具、回执；句子里带�
   assert.equal(r.pushes[1].meta.message_id, 'om_new')
 }))
 
-test('「停」杀当前前台工具，不碰别的子进程', async () => {
+// 真起一个 bash 子进程当工具。Windows 上的查表与杀树由 proc.test.mjs 用模拟的 PowerShell 输出覆盖
+test('「停」杀当前前台工具，不碰别的子进程', { skip: IS_WIN && '要真 bash 子进程，只在 Linux / macOS 跑' }, async () => {
   const r = new Rig()
   // 用测试进程充当 Claude Code：它的 sh 子进程就是工具进程
   try {
@@ -431,9 +436,11 @@ test('真桥先于常驻进程启动：连接失败后重试，消息和 reply �
     assert.match(res.content[0].text, /已发送/)
   } finally {
     await client.close()
-    spawnSync('pkill', ['-f', r.dir]) // 外层循环：命令行里有本次临时目录
-    const pid = /常驻进程启动 pid=(\d+)/.exec(r.log())?.[1]
-    if (pid) process.kill(Number(pid), 'SIGKILL')
+    // 桥起的外层循环是分离进程：先杀它再杀常驻进程，免得又被拉起
+    const m = /常驻进程启动 pid=(\d+)，外层循环 (\d+)/.exec(r.log())
+    for (const pid of m ? [m[2], m[1]] : []) {
+      try { process.kill(Number(pid), 'SIGKILL') } catch {}
+    }
     r.close()
   }
 })
@@ -473,7 +480,7 @@ test('撤回事件：排队中的不送，比轮询先生效', async () => {
 })
 
 const tool = (r, action, args) => new Promise(resolve => {
-  const c = connect(join(r.dir, 'cli_me.sock'))
+  const c = connect(r.sock)
   createInterface({ input: c }).on('line', l => { resolve(JSON.parse(l)); c.destroy() })
   c.write(`${JSON.stringify({ t: 'schedule', id: 1, action, args })}\n`)
 })
@@ -573,7 +580,7 @@ test('定时：「停」后暂停，下一条新指令恢复并标明晚了多�
 
 test('定时：等进程结束，常驻进程重启不丢', async () => {
   const r = new Rig()
-  const job = spawn('sleep', ['30'], { stdio: 'ignore' })
+  const job = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' })
   try {
     await r.startDaemon()
     await r.bridge()

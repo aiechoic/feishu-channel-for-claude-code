@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import proc from './proc.mjs'
 
 // 定时：daily / weekly 按配置时区算下一次，once 给绝对时间，不依赖系统时区。只算时间，不碰状态。
 const pad = n => String(n).padStart(2, '0')
@@ -48,14 +48,9 @@ export function wall(ms, tz) {
   return `${z.year}-${pad(z.month)}-${pad(z.day)} ${pad(z.hour)}:${pad(z.minute)}`
 }
 
-/** 按 ppid 无关的 pid + 启动时刻认进程，防 pid 复用；容器重启后两者对不上，算已结束 */
+/** 按 pid + 启动时刻认进程，防 pid 复用；机器或容器重启后两者对不上，算已结束。不在返回 null */
 export function procStart(pid) {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]
-  } catch {
-    return null
-  }
+  return proc.start(pid)
 }
 
 export function parseAdd(args, tz, now) {
