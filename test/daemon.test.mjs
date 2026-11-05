@@ -203,23 +203,32 @@ test('「停」：清空队列、写标记、拦工具、回执；句子里带�
   assert.equal(r.pushes[1].meta.message_id, 'om_new')
 }))
 
-// 真起一个 bash 子进程当工具。Windows 上的查表与杀树由 proc.test.mjs 用模拟的 PowerShell 输出覆盖
-test('「停」杀当前前台工具，不碰别的子进程', { skip: IS_WIN && '要真 bash 子进程，只在 Linux / macOS 跑' }, async () => {
-  const r = new Rig()
-  // 用测试进程充当 Claude Code：它的 sh 子进程就是工具进程
-  try {
-    await r.startDaemon()
-    await r.bridge(process.pid)
-    r.hook('PreToolUse', { tool_name: 'Bash' })
-    await sleep(100)
-    const shell = spawn('bash', ['-c', 'sleep 300 & wait'], { stdio: 'ignore' })
-    const gone = new Promise(res => shell.on('exit', res))
-    r.add(msg('om_stop', 'ou_ok', { content: '停' }))
-    await until(() => r.log().includes('已杀工具进程树'), '杀进程')
-    await gone
-    assert.ok(r.daemon.exitCode === null, '常驻进程还活着')
-  } finally { r.close() }
-})
+// 真起一个 bash 子进程当工具。Windows 上的查表与杀树由 proc.test.mjs 用模拟的 PowerShell 输出覆盖。
+// Windows 版 Claude Code 跑命令的工具叫 PowerShell：工具名换成它也要找得到、杀得掉（这里的子进程仍是 bash，只验工具名那一侧）
+for (const tool of ['Bash', 'PowerShell']) {
+  test(`「停」杀当前前台工具（${tool} 工具），不碰别的子进程`, { skip: IS_WIN && '要真 bash 子进程，只在 Linux / macOS 跑' }, async () => {
+    const r = new Rig()
+    let shell
+    // 用测试进程充当 Claude Code：它的 sh 子进程就是工具进程
+    try {
+      await r.startDaemon()
+      await r.bridge(process.pid)
+      r.hook('PreToolUse', { tool_name: tool })
+      await sleep(100)
+      shell = spawn('bash', ['-c', 'sleep 300 & wait'], { stdio: 'ignore', detached: true })
+      const gone = new Promise(res => shell.on('exit', res))
+      r.add(msg('om_stop', 'ou_ok', { content: '停' }))
+      await until(() => r.log().includes('已杀工具进程树'), '杀进程')
+      assert.match(r.log(), /停（收到「停」）：丢 0 条，杀工具 true/)
+      await gone
+      assert.ok(r.daemon.exitCode === null, '常驻进程还活着')
+    } finally {
+      // 没杀成时别把 sleep 留下（整个进程组一起收）
+      try { process.kill(-shell.pid, 'SIGKILL') } catch {}
+      r.close()
+    }
+  })
+}
 
 test('排队中撤回只撤下；处理中撤回打断这一轮，同一轮忙时送达的照样要处理，不暂停定时', async () => {
   const r = new Rig()

@@ -45,7 +45,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 ### Windows
 
-要 Node 20+（`node` 在 PATH 里）和 Git for Windows（Claude Code 的 Bash 工具用 Git Bash）。PowerShell 里：
+要 Node 20+（`node` 在 PATH 里）。Claude Code 在 Windows 上跑命令用 PowerShell 工具（`powershell.exe` / `pwsh.exe`）或 Bash 工具（Git Bash 的 `bash.exe`），两种都认。PowerShell 里：
 
 ```powershell
 git clone <本仓库>; cd feishu-channel-for-claude-code
@@ -100,7 +100,7 @@ node bin\setup.mjs
 - **忙闲**：`UserPromptSubmit` 和送出标忙，`Stop` 标闲，工具 hook 写心跳。按 Esc 没有 `Stop`，靠心跳超时恢复。桥断开算离线。
 - **合并送达**：闲时把同一会话的排队消息合并成一条。送出后等到 hook 才算送达，因为 Claude Code 未就绪时会静默丢通知；等不到就退回队列退避重发，重发的 `meta.retry` 有值，按 `message_id` 去重。
 - **忙时送达**：会话忙时，白名单发送者的消息也立刻送出，不等这一轮结束；Claude Code 在当前工具调用结束时把它带进这一轮（会触发一次 UserPromptSubmit），并标成外部内容，所以最长要等当前这个工具跑完。上一条还没被桥确认时到的消息，确认后同一会话合并送出。常驻进程自己的说明（撤回作废）和定时仍等闲时送。停止标记在时（「停」或撤回打断这一轮期间）也等闲，不往要结束的这一轮里送；「停」之前已送出、还没进会话的补充随后照样进会话，但不解除停止标记。忙时送达的消息同样算处理中：撤回会打断这一轮，「停」把它标成已停。
-- **停**：白名单发送者的文本消息整条是「停」才触发。清空队列，杀当前前台 Bash 工具的进程树（后台任务和 Claude Code 本身不动），之后的工具调用被拒绝，这一轮结束，回群报丢了几条。
+- **停**：白名单发送者的文本消息整条是「停」才触发。清空队列，杀当前前台命令工具（Bash 或 PowerShell）的进程树（后台任务和 Claude Code 本身不动），之后的工具调用被拒绝，这一轮结束，回群报丢了几条。
 - **收消息**：事件带的内容直接入队，不拉历史。发送者的 open_id 在 `allow` 里、或之前 get 认过时走这条路；没见过或缺字段时 get 单条，按它返回的发送者（机器人是 `cli_` 开头的 app id）再判一次。get 失败或入队失败时立即补拉这个会话，列表暂时没有就只对这个会话退避重试，不影响其他会话的补漏。入队后再在后台拉一次这个会话，补上没来事件的消息，不影响送达速度。全量补漏用来补断线期间的消息。
 - **首次运行**：状态目录里还没有已读记录时，第一轮全量补漏把各会话现有的消息记为已读、不送，日志按会话写一行跳过了哪些；这一轮补完之后到的消息照常送。之后新进的群只补最近 24 小时，同样写日志。
 - **撤回**：排队中的从队列撤下，回执「已从队列撤下」。正在处理的打断这一轮（拦工具调用、杀前台工具），回执写明消息 id，再补发作废说明；队列不清。已处理完的回执「已作废」，补发作废说明。撤回都不暂停定时，只有「停」暂停。
@@ -128,7 +128,7 @@ node bin\setup.mjs
 
 ## 已知限制
 
-- 只杀前台 Bash；其他工具靠下一次 `PreToolUse` 拦。
+- 只杀前台的 Bash / PowerShell 命令；其他工具靠下一次 `PreToolUse` 拦。
 - 按 Esc 或崩溃后，处理中的表情不会变成完成；Esc 后默认约 3 分钟才判闲。
 - 模型思考超过 `busyTimeoutSec` 且没有工具调用时，会被判闲并提前送出。
 - 重开会话后第一条消息约 `wakeTimeoutSec` 秒才到。

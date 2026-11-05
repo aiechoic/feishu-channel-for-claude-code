@@ -23,7 +23,7 @@ import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { paths, readConfig } from './common.mjs'
 import { checkScopes } from './doctor.mjs'
-import proc, { SHELL_NAME } from './proc.mjs'
+import proc, { COMMAND_TOOLS, SHELL_NAME } from './proc.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
 
 const cfg = readConfig()
@@ -230,9 +230,9 @@ function onHook(h) {
   }
 }
 
-/** 当前前台 Bash 工具的进程：Claude Code 的子 shell 里，开始时间不早于那次 PreToolUse 的最新一个 */
+/** 当前前台命令工具（Bash / PowerShell）的进程：Claude Code 的子 shell 里，开始时间不早于那次 PreToolUse 的最新一个 */
 function toolProcess() {
-  const started = Object.values(S.inflight).filter(t => t.tool === 'Bash').map(t => t.at)
+  const started = Object.values(S.inflight).filter(t => COMMAND_TOOLS.has(t.tool)).map(t => t.at)
   if (!bridge || !started.length) return null
   const after = Math.min(...started) - 2000
   const shells = proc.children(bridge.claudePid).filter(p => p.pid !== bridge.bridgePid

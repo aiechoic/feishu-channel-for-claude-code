@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { paths } from '../src/common.mjs'
-import { makeProc, parseWinDate, SHELL_NAME } from '../src/proc.mjs'
+import { COMMAND_TOOLS, makeProc, parseWinDate, SHELL_NAME } from '../src/proc.mjs'
 
 // 进程表两边的解析：Linux 喂假 /proc，Windows 喂假 PowerShell / taskkill 输出，在任何平台上都跑
 
@@ -97,4 +97,37 @@ test('本机端点：Linux 是状态目录里的 socket 文件；Windows 是带�
   assert.equal(a.superSock, `${a.sock}-supervise`)
   assert.notEqual(a.sock, b.sock, '两个状态目录不能撞名')
   assert.equal(paths({ appId: 'cli_a', stateDir: 'c:\\S\\One' }, 'win32').sock, a.sock, 'Windows 路径不分大小写')
+})
+
+test('跑命令的工具：Bash 和 PowerShell；认得出它们起的 shell', () => {
+  assert.ok(COMMAND_TOOLS.has('Bash') && COMMAND_TOOLS.has('PowerShell'))
+  assert.ok(!COMMAND_TOOLS.has('Read'))
+  for (const name of ['bash', 'sh', 'zsh', 'dash', 'bash.exe', 'powershell.exe', 'PowerShell.EXE', 'pwsh.exe', 'pwsh'])
+    assert.ok(SHELL_NAME.test(name), name)
+  for (const name of ['node.exe', 'conhost.exe', 'cmd.exe', 'claude.exe', 'bashful', 'powershell_ise.exe'])
+    assert.ok(!SHELL_NAME.test(name), name)
+})
+
+test('Windows：PowerShell 工具起的 powershell.exe 是工具进程，taskkill 杀它的树', () => {
+  const calls = []
+  const rows = {
+    'ParentProcessId=10': [
+      { ProcessId: 40, ParentProcessId: 10, Name: 'powershell.exe', Created: '2026-11-05T08:50:00.0000000Z', CommandLine: 'powershell.exe -NoProfile -Command "npm test"' },
+      { ProcessId: 41, ParentProcessId: 10, Name: 'pwsh.exe', Created: '2026-11-05T08:50:01.0000000Z', CommandLine: 'pwsh.exe -Command "Start-Sleep 300"' },
+    ],
+    'ParentProcessId=40': { ProcessId: 42, ParentProcessId: 40, Name: 'node.exe', Created: '2026-11-05T08:50:00.5000000Z', CommandLine: 'node test' },
+  }
+  const p = makeProc({
+    platform: 'win32',
+    exec: (cmd, args) => {
+      calls.push([cmd, ...args].join(' '))
+      if (cmd === 'taskkill.exe') return ''
+      const filter = /-Filter '([^']+)'/.exec(args.at(-1))[1]
+      return rows[filter] ? JSON.stringify(rows[filter]) : ''
+    },
+  })
+  const shells = p.children(10).filter(k => SHELL_NAME.test(k.name))
+  assert.deepEqual(shells.map(k => k.pid), [40, 41])
+  assert.deepEqual(p.killTree(40), [40, 42])
+  assert.ok(calls.includes('taskkill.exe /PID 40 /T /F'))
 })

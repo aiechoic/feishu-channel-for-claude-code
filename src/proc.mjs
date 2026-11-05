@@ -10,8 +10,14 @@ import { readdirSync, readFileSync } from 'node:fs'
 
 const run = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore'] })
 
-/** Claude Code 的 Bash 工具起的 shell：Linux 上是 sh / bash / zsh / dash；Windows 上是 Git Bash 的 bash.exe */
-export const SHELL_NAME = /^(ba|z|da)?sh(\.exe)?$/i
+/** 跑命令的工具名：Bash，以及 Windows 版 Claude Code 的 PowerShell */
+export const COMMAND_TOOLS = new Set(['Bash', 'PowerShell'])
+
+/**
+ * 这两个工具起的 shell：Linux 上是 sh / bash / zsh / dash；Windows 上是 Git Bash 的 bash.exe、
+ * PowerShell 工具的 powershell.exe（Windows PowerShell）或 pwsh.exe（PowerShell 7）
+ */
+export const SHELL_NAME = /^((ba|z|da)?sh|powershell|pwsh)(\.exe)?$/i
 
 /**
  * @param {object} [o]
