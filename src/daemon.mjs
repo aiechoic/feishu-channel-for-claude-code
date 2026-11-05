@@ -790,6 +790,8 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => shutdow
 
 server.listen(P.sock, async () => {
   log(`常驻进程启动 pid=${process.pid}，外层循环 ${process.ppid}`)
+  // 给 bin/restart.mjs 认人：pid 加启动时刻，防 pid 被复用后杀错
+  writeFileSync(P.pidFile, JSON.stringify({ pid: process.pid, start: proc.start(process.pid) }))
   await selfCheck()
   me = cfg.appId
   await schedule()

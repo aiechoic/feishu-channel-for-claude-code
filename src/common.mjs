@@ -46,6 +46,8 @@ export function paths(cfg, platform = process.platform) {
     sock: endpoint(base, dir, cfg.appId, '', platform),
     /** 外层循环占着它，保证同一个状态目录只跑一份 */
     superSock: endpoint(base, dir, cfg.appId, '-supervise', platform),
+    /** 常驻进程启动时写 { pid, start }，bin/restart.mjs 凭它认准要杀的那个进程 */
+    pidFile: `${base}.pid`,
     /** 旧版外层循环（supervise.sh）flock 的锁文件；新版启动时看它还被占着就让位 */
     lock: `${base}.lock`,
     stopFlag: `${base}.stop`,

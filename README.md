@@ -19,6 +19,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 | `src/bridge.mjs` | MCP 桥（stdio）：只转发，启动时确保外层循环在跑 |
 | `src/hook.mjs` | Claude Code hook：上报忙闲和工具名，看到停止标记时结束这一轮 |
 | `src/feishu.mjs` | 飞书适配器，基于官方 Node SDK |
+| `bin/restart.mjs` | 重启常驻进程：凭 pid 文件认准再杀，等外层循环拉起新的 |
 | `src/proc.mjs` | 进程表：查子进程、杀进程树、取启动时刻；Linux 读 `/proc`，Windows 用 PowerShell 和 `taskkill` |
 
 会话关闭后常驻进程继续运行，消息和定时都留着，下次会话连上再送。
@@ -137,6 +138,18 @@ node bin\setup.mjs
 - 只有一个 `statusChat`，定时消息都发到这里。
 - 同一应用只跑一个常驻进程、一个会话。
 - 长连接重连由官方 SDK 负责；连接悄悄失效时靠 `sweepSec` 的定时全量补漏兜底，最长延迟这么久。
+
+## 重启常驻进程
+
+升级代码或改了配置后，重启常驻进程（不动外层循环，它 2 秒后把常驻进程拉起来）：
+
+```bash
+node bin/restart.mjs            # 配置文件取法同其他入口：环境变量 FEISHU_CHANNEL_CONFIG、第一个参数、默认位置
+```
+
+常驻进程启动时把自己的 pid 和启动时刻写进 `<stateDir>/<appId>.pid`。`restart.mjs` 两样都和进程表对得上才杀（防 pid 被复用后杀错），杀完等新的常驻进程写进新 pid，打印新旧 pid；15 秒等不到就报错。退出码：0 重启成功；1 没在跑，什么都没杀；2 杀了但等不到新的（多半是外层循环不在，重开一次会话会把它拉起）。Linux 发 SIGTERM，Windows 用 `taskkill /F`，只杀这一个进程。
+
+自动模式下，在 `.claude/settings.json` 的 `permissions.allow` 里加 `"Bash(node <仓库路径>/bin/restart.mjs*)"`，会话就能自己重启，不用请人手动杀进程。
 
 ## 排查
 

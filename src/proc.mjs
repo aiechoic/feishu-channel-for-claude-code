@@ -111,6 +111,10 @@ function linux(o) {
         return null
       }
     },
+    /** 只杀这一个进程（SIGTERM，常驻进程收到后自己收尾退出） */
+    kill(pid) {
+      kill(pid, 'SIGTERM')
+    },
   }
 }
 
@@ -171,6 +175,10 @@ function windows(exec) {
     start(pid) {
       const [p] = query(`ProcessId=${Number(pid)}`)
       return p && Number.isFinite(p.startMs) ? String(p.startMs) : null
+    },
+    /** 只杀这一个进程，不带 /T（不动它的子孙） */
+    kill(pid) {
+      exec('taskkill.exe', ['/PID', String(Number(pid)), '/F'])
     },
   }
 }
