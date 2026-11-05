@@ -457,7 +457,8 @@ function onRecall(id) {
 
 // ---------- 补漏 ----------
 
-const firstRun = !existsSync(P.seen)
+// 首次运行：只有第一轮全量补漏把会话里已有的消息当旧的（记已读、不送），这一轮补完就置 false，之后照常送
+let firstRun = !existsSync(P.seen)
 if (firstRun) writeFileSync(P.seen, '')
 const seen = new Set(words(P.seen))
 const dmChats = new Set(words(P.dms))
@@ -530,7 +531,9 @@ async function catchUpChat(chat, isGroup, loud) {
   if (loud) log(`拉取开始 ${chat}`)
   const rows = await unread(chat)
   if (loud || rows.length) log(`拉取结束 ${chat}：${Date.now() - begin}ms，新消息 ${rows.length} 条 ${rows.map(m => m.message_id).join(' ')}`)
-  for (const m of rows) admit(m, chat, isGroup, firstRun || (fresh && (m.create_time ?? '') < dayAgo()))
+  const old = rows.filter(m => firstRun || (fresh && (m.create_time ?? '') < dayAgo()))
+  if (old.length) log(`跳过 ${chat} 的 ${old.length} 条旧消息（${firstRun ? '首次运行，现有消息记为已读' : '新进的群，只收最近 24 小时'}）：${old.map(m => m.message_id).join(' ')}`)
+  for (const m of rows) admit(m, chat, isGroup, old.includes(m))
   let again = 0
   for (const [id, w] of missing) {
     if (w.chat !== chat) continue
@@ -602,6 +605,10 @@ async function catchUp(only) {
   const begin = Date.now()
   for (const chat of chats) await catchUpChat(chat, !dmChats.has(chat), Boolean(only))
   if (!only) log(`全量补漏结束：${chats.length} 个会话，${Date.now() - begin}ms`)
+  if (!only && firstRun) {
+    firstRun = false
+    log('首次运行：现有消息已记为已读，之后的消息照常送')
+  }
   if (gs.length) {
     gs.forEach(g => known.add(g))
     writeFileSync(P.known, [...known].sort().join('\n'))
@@ -786,7 +793,6 @@ server.listen(P.sock, async () => {
   await selfCheck()
   me = cfg.appId
   await schedule()
-  if (firstRun) log('首次运行：现有消息已记为已读')
   feishu.listen({
     onConnected: () => {
       log('长连接已连上')

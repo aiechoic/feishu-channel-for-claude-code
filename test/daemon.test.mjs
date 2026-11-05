@@ -675,3 +675,28 @@ test('轮询发现撤回而事件没来：提示一次；事件来了不提示',
   await sleep(300)
   assert.equal(r.log().match(/撤回事件可能没订阅/g).length, 1)
 }, { recallPollSec: 0.1, recallHintSec: 0.05 }))
+
+test('首次运行：只有第一轮全量补漏把现有消息当旧的；之后到的消息补漏照常送出，跳过的写日志', async () => {
+  const r = new Rig({ sweepSec: 0.3 })
+  rmSync(join(r.dir, 'cli_me-seen.txt')) // 没有已读记录 = 首次运行
+  r.messages.push(msg('om_before'))
+  r.write()
+  try {
+    await r.startDaemon()
+    await r.bridge()
+    await until(() => r.log().includes('首次运行：现有消息已记为已读'), '第一轮补完')
+    assert.match(r.log(), /跳过 oc_group 的 1 条旧消息（首次运行，现有消息记为已读）：om_before/)
+    // 事件不带内容（推送不通、只能靠补漏时的样子）：补这个会话
+    r.add(msg('om_after_event'))
+    await until(() => r.pushes.length === 1, '第一轮之后的消息由补漏送出')
+    assert.equal(r.pushes[0].meta.message_id, 'om_after_event')
+    r.hook('UserPromptSubmit')
+    r.hook('Stop')
+    // 没有事件，只靠定时全量补漏
+    r.messages.push(msg('om_after_sweep'))
+    r.write()
+    await until(() => r.pushes.length === 2, '定时全量补漏送出')
+    assert.equal(r.pushes[1].meta.message_id, 'om_after_sweep')
+    assert.ok(!r.pushes.some(p => p.meta.message_id.includes('om_before')), '首次运行前的旧消息不送')
+  } finally { r.close() }
+})
