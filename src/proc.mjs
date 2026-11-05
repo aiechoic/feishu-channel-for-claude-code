@@ -20,6 +20,18 @@ export const COMMAND_TOOLS = new Set(['Bash', 'PowerShell'])
 export const SHELL_NAME = /^((ba|z|da)?sh|powershell|pwsh)(\.exe)?$/i
 
 /**
+ * claude 的这个子进程是不是前台命令的 shell。
+ * Windows 版 Claude Code 的 PowerShell 工具中间隔一层 cmd.exe：
+ *   claude.exe → cmd.exe /d /s /c ""chcp.com" 65001 >nul & "powershell.exe" -NoProfile …" → powershell.exe …
+ * 所以 claude 的直接子进程是 cmd.exe、且命令行里带 powershell.exe / pwsh.exe 的也算，杀树从这个 cmd.exe 起（taskkill /T 带走下面的）。
+ * 只认命令行带 powershell / pwsh 的 cmd.exe，别的 cmd.exe 不算。
+ */
+export function isCommandShell({ name, cmd = '' }) {
+  if (SHELL_NAME.test(name)) return true
+  return /^cmd(\.exe)?$/i.test(name) && /(^|[\\/"\s])(powershell|pwsh)(\.exe)?(["\s]|$)/i.test(cmd)
+}
+
+/**
  * @param {object} [o]
  * @param {string} [o.platform] 缺省 process.platform
  * @param {(cmd: string, args: string[]) => string} [o.exec] 执行外部命令、返回 stdout（Windows 用；单测注入假输出）

@@ -57,7 +57,7 @@ node bin\setup.mjs
 
 其余同上。和 Linux 的差别：
 
-- 「停」杀前台工具用 `taskkill /T /F`（Windows 没有让工具收尾的温和信号）；找工具进程用 PowerShell 的 `Get-CimInstance Win32_Process`，每次约 1 秒，只在「停」、撤回打断、忙时心跳超时时查。
+- 「停」杀前台工具用 `taskkill /T /F`（Windows 没有让工具收尾的温和信号）。PowerShell 工具的进程外面隔一层 `cmd.exe`（命令行里带 `powershell.exe` / `pwsh.exe`），从这层 `cmd.exe` 起杀整棵树；找工具进程用 PowerShell 的 `Get-CimInstance Win32_Process`，每次约 1 秒，只在「停」、撤回打断、忙时心跳超时时查。
 - `process` 定时按 Windows 的进程创建时间认进程。
 - 外层循环和常驻进程是无窗口的分离进程，关掉终端不影响；要停就在任务管理器里结束 `node`（命令行含 `supervise.mjs` 和 `daemon.mjs` 的两个）。
 

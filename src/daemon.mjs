@@ -23,7 +23,7 @@ import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { paths, readConfig } from './common.mjs'
 import { checkScopes } from './doctor.mjs'
-import proc, { COMMAND_TOOLS, SHELL_NAME } from './proc.mjs'
+import proc, { COMMAND_TOOLS, isCommandShell } from './proc.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
 
 const cfg = readConfig()
@@ -236,7 +236,7 @@ function toolProcess() {
   if (!bridge || !started.length) return null
   const after = Math.min(...started) - 2000
   const shells = proc.children(bridge.claudePid).filter(p => p.pid !== bridge.bridgePid
-    && SHELL_NAME.test(p.name) && p.startMs >= after && !p.cmd.includes('hook.mjs'))
+    && isCommandShell(p) && p.startMs >= after && !p.cmd.includes('hook.mjs'))
   return shells.sort((a, b) => b.startMs - a.startMs)[0]?.pid ?? null
 }
 

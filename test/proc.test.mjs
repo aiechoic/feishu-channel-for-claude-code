@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { paths } from '../src/common.mjs'
-import { COMMAND_TOOLS, makeProc, parseWinDate, SHELL_NAME } from '../src/proc.mjs'
+import { COMMAND_TOOLS, isCommandShell, makeProc, parseWinDate, SHELL_NAME } from '../src/proc.mjs'
 
 // 进程表两边的解析：Linux 喂假 /proc，Windows 喂假 PowerShell / taskkill 输出，在任何平台上都跑
 
@@ -130,4 +130,48 @@ test('Windows：PowerShell 工具起的 powershell.exe 是工具进程，taskkil
   assert.deepEqual(shells.map(k => k.pid), [40, 41])
   assert.deepEqual(p.killTree(40), [40, 42])
   assert.ok(calls.includes('taskkill.exe /PID 40 /T /F'))
+})
+
+// 运维在 Windows 上量到的真实进程链：claude.exe 26696 → cmd.exe 20476 → powershell.exe 27508
+const PS_CMD = 'cmd.exe /d /s /c ""chcp.com" 65001 >nul & "powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$__claudeCodeScript = \'Start-Sleep 300\'""'
+const PS_CHILD = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$__claudeCodeScript = \'Start-Sleep 300\'"'
+
+test('PowerShell 工具外面那层 cmd.exe 算前台命令进程；别的 cmd.exe 不算', () => {
+  assert.ok(isCommandShell({ name: 'cmd.exe', cmd: PS_CMD }))
+  assert.ok(isCommandShell({ name: 'cmd.exe', cmd: 'cmd.exe /c C:\\Program Files\\PowerShell\\7\\pwsh.exe -c x' }))
+  assert.ok(isCommandShell({ name: 'CMD.EXE', cmd: 'C:\\Windows\\system32\\cmd.exe /c "powershell" -c x' }))
+  assert.ok(isCommandShell({ name: 'bash.exe', cmd: '' }), 'Bash 工具照旧')
+  assert.ok(!isCommandShell({ name: 'cmd.exe', cmd: 'cmd.exe /d /s /c "node "C:/x/hook.mjs" "C:/cfg.json""' }))
+  assert.ok(!isCommandShell({ name: 'cmd.exe', cmd: 'cmd.exe /c type powershell_notes.txt' }))
+  assert.ok(!isCommandShell({ name: 'cmd.exe', cmd: 'cmd.exe /c echo mypowershell.exe.txt' }))
+  assert.ok(!isCommandShell({ name: 'node.exe', cmd: 'node powershell.exe' }))
+})
+
+test('Windows：claude → cmd.exe → powershell.exe，找到 cmd.exe 并从它起 taskkill /T 杀树', () => {
+  const calls = []
+  const rows = {
+    'ParentProcessId=26696': [
+      { ProcessId: 20476, ParentProcessId: 26696, Name: 'cmd.exe', Created: '2026-11-05T09:10:00.0000000Z', CommandLine: PS_CMD },
+      { ProcessId: 20500, ParentProcessId: 26696, Name: 'cmd.exe', Created: '2026-11-05T09:10:00.2000000Z', CommandLine: 'cmd.exe /d /s /c "node "C:/x/hook.mjs" "C:/cfg.json""' },
+      { ProcessId: 20600, ParentProcessId: 26696, Name: 'node.exe', Created: '2026-11-05T09:09:00.0000000Z', CommandLine: 'node C:/x/bridge.mjs' },
+    ],
+    'ParentProcessId=20476': [
+      { ProcessId: 20480, ParentProcessId: 20476, Name: 'chcp.com', Created: '2026-11-05T09:10:00.0100000Z', CommandLine: 'chcp.com 65001' },
+      { ProcessId: 27508, ParentProcessId: 20476, Name: 'powershell.exe', Created: '2026-11-05T09:10:00.1000000Z', CommandLine: PS_CHILD },
+    ],
+    'ParentProcessId=27508': { ProcessId: 27600, ParentProcessId: 27508, Name: 'node.exe', Created: '2026-11-05T09:10:01.0000000Z', CommandLine: 'node test' },
+  }
+  const p = makeProc({
+    platform: 'win32',
+    exec: (cmd, args) => {
+      calls.push([cmd, ...args].join(' '))
+      if (cmd === 'taskkill.exe') return ''
+      const filter = /-Filter '([^']+)'/.exec(args.at(-1))[1]
+      return rows[filter] ? JSON.stringify(rows[filter]) : ''
+    },
+  })
+  const tools = p.children(26696).filter(k => isCommandShell(k) && !k.cmd.includes('hook.mjs'))
+  assert.deepEqual(tools.map(k => k.pid), [20476], '只认 PowerShell 外面那层 cmd.exe')
+  assert.deepEqual(p.killTree(20476), [20476, 20480, 27508, 27600])
+  assert.ok(calls.includes('taskkill.exe /PID 20476 /T /F'))
 })
