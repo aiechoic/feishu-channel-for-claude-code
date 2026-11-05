@@ -298,6 +298,7 @@ const event = (r, m, senderId) => writeFileSync(join(r.dir, 'event'), JSON.strin
   chat: 'oc_group', message: { ...m, sender: { id: senderId, sender_type: 'user' } },
 }))
 
+// 撤回轮询也对已送达的消息调 get，关掉才数得准 get.log
 test('事件直入：发送者在白名单就用事件内容，不调 get，顺带补漏同会话漏掉的消息', () => rig(async r => {
   event(r, msg('om_ev'), 'ou_ok')
   await until(() => r.pushes.length === 1, '送达')
@@ -312,8 +313,9 @@ test('事件直入：发送者在白名单就用事件内容，不调 get，顺�
   r.hook('UserPromptSubmit')
   r.hook('Stop')
   await until(() => r.pushes.map(p => p.content).join().includes('om_noevent'), '没事件的那条也补上')
-}))
+}, { recallPollSec: 0 }))
 
+// 撤回轮询也对已送达的消息调 get，关掉才数得准 get.log
 test('事件发送者对不上白名单：按 get 到的发送者判，白名单外照样丢弃', () => rig(async r => {
   r.messages.push(msg('om_bad', 'ou_bad'))
   r.write()
@@ -328,7 +330,7 @@ test('事件发送者对不上白名单：按 get 到的发送者判，白名单
   assert.match(r.file('cli_me-seen.txt'), /om_bad/)
   await sleep(100)
   assert.equal(r.pushes.length, 1)
-}))
+}, { recallPollSec: 0 }))
 
 test('认过的发送者不再 get：白名单里的直接入队，白名单外的直接丢，常驻进程重启后还记得', async () => {
   const r = new Rig({ recallPollSec: 0 }) // 撤回轮询也调 get，关掉才数得准
