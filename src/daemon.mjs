@@ -5,8 +5,11 @@
  * 收：长连接事件带的内容直接入队；启动 / 连上时和定时全量补漏只补漏。以已读记录为准，不漏不重。
  * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
  *   事件里的发送者对不上 allow 时（机器人只有 open_id），按 get 单条拿到的发送者再判一次。
+ * 只送达（observe）：observe 为 true 时机器人在的全部会话，写成 { chats, dms } 时列出的群（和开了 dms 时的私信）里，白名单外的人发的消息也入队，标成外部发送者（meta.trust=external）。
+ *   和白名单的一样忙时送达，但不授权：「停」当普通消息；撤回只从队列撤下，已送出的不拦工具、不杀进程，只补发作废说明（忙时也送）；
+ *   送达不解除「停」暂停的定时。合并时不和白名单消息混在一条。
  * 送：闲时把队列里同一会话的消息合并成一条，经桥（bridge.mjs）送出，桥确认后出队。
- *   忙时白名单发送者的消息也立刻送，Claude Code 在下一次工具调用前后带进这一轮（标成外部内容）；说明、定时和停止标记在时等闲。
+ *   忙时发送者的消息也立刻送，Claude Code 在下一次工具调用前后带进这一轮（标成外部内容）；说明、定时和停止标记在时等闲。
  *   会话没就绪时 Claude Code 会静默丢掉通知，所以送出后等到 hook 才算唤醒，等不到退回队列重发。
  * 忙闲：hook.mjs 上报。忙且心跳超时、且没有活着的工具进程时按闲处理。
  * 停：白名单发送者整条消息就是「停」时，清空队列、写停止标记、杀当前工具进程。
@@ -33,6 +36,12 @@ mkdirSync(P.dir, { recursive: true })
 const adapter = process.env.FEISHU_ADAPTER ? pathToFileURL(process.env.FEISHU_ADAPTER).href : './feishu.mjs'
 const feishu = (await import(adapter)).connect(cfg, msg => log(msg))
 const ALLOW = new Set(cfg.allow)
+// observe: true 是机器人在的全部群和私信；写成 { chats, dms } 时只收这些
+const OBSERVE_ALL = cfg.observe === true
+const OBSERVE_CHATS = new Set(cfg.observe?.chats ?? [])
+const OBSERVE_DMS = Boolean(cfg.observe?.dms)
+/** 这个会话里白名单外的人发的消息也送（只送达、不授权） */
+const observed = (chat, isGroup) => OBSERVE_ALL || OBSERVE_CHATS.has(chat) || (!isGroup && OBSERVE_DMS)
 const SWEEP_MS = (cfg.sweepSec ?? 600) * 1000
 const BUSY_TIMEOUT_MS = (cfg.busyTimeoutSec ?? 180) * 1000
 const RECALL_POLL_MS = (cfg.recallPollSec ?? 60) * 1000
@@ -175,6 +184,7 @@ function setBusy(why) {
 
 function setIdle(why, finished) {
   rmSync(P.stopFlag, { force: true })
+  plainInjected = 0
   S.inflight = {}
   tool = ''
   if (S.busy) {
@@ -191,7 +201,7 @@ function setIdle(why, finished) {
 
 function onHook(h) {
   log(`hook ${h.event}${h.tool ? ` ${h.tool}` : ''}${h.blocked ? '（已拦）' : ''}`)
-  const systemWake = waking?.batch.every(m => m.notice) // 系统说明和定时唤醒的一轮不算新指令
+  const systemWake = waking?.batch.every(m => m.notice || m.external) // 系统说明、定时、外部发送者唤醒的一轮不算新指令
   woke() // 只在闲时送出，送出后的任何 hook 都说明会话收到了
   switch (h.event) {
     case 'UserPromptSubmit':
@@ -200,7 +210,9 @@ function onHook(h) {
         setBusy(h.event)
         break
       }
-      if (!systemWake) S.schedulesPaused = false
+      // 忙时送进去的只有外部发送者的消息或说明时，这次 UserPromptSubmit 是它们触发的，也不算新指令
+      if (!systemWake && !(S.busy && plainInjected)) S.schedulesPaused = false
+      plainInjected = 0
       rmSync(P.stopFlag, { force: true })
       setBusy(h.event)
       deliver() // 停止标记清掉了，等着的消息可以忙时送
@@ -256,6 +268,8 @@ function watchdog() {
 // ---------- 送达 ----------
 
 let pushing = null
+/** 忙时送出、不含白名单消息（只有外部发送者的消息或说明）的批数；它们进会话时触发的 UserPromptSubmit 不解除定时暂停 */
+let plainInjected = 0
 let waking = null // { batch, timer }：已送出、等会话唤醒
 let wakeTries = 0
 
@@ -263,21 +277,23 @@ function clip(text) {
   return text.length <= CLIP ? text : `${text.slice(0, CLIP)} …[已截断，全文按 message_id 用 lark-cli 拉]`
 }
 
-/** 闲时：队首会话的全部排队（含说明、定时）合并送出，等 hook 确认唤醒。
- * 忙时：只送白名单发送者的消息（队列里的消息都已过白名单），说明和定时等闲；停止标记在时（「停」或撤回打断中）也等闲 */
+/** 闲时：队首会话的排队（含说明、定时）合并送出，等 hook 确认唤醒；外部发送者的消息单独成一批，不和白名单的混。
+ * 忙时：送发送者的消息和标了 urgent 的说明，其余说明和定时等闲；停止标记在时（「停」或撤回打断中）全部等闲 */
 function deliver() {
   if (!bridge || pushing || waking || !S.queue.length) return
   const busy = S.busy
   if (busy && existsSync(P.stopFlag)) return
-  const pool = busy ? S.queue.filter(m => !m.notice) : S.queue
+  const pool = busy ? S.queue.filter(m => !m.notice || m.urgent) : S.queue
   if (!pool.length) return
   const chat = pool[0].chat
-  const batch = pool.filter(m => m.chat === chat)
+  const external = Boolean(pool[0].external)
+  const batch = pool.filter(m => m.chat === chat && Boolean(m.external) === external)
   const first = batch[0]
   const ids = batch.filter(m => !m.notice).map(m => m.message_id)
+  const head = m => [m.label ?? m.message_id ?? '系统说明', m.sender_name, m.external && m.sender_id !== m.sender_name ? m.sender_id : '', m.create_time]
   const content = batch.length === 1
     ? clip(first.content)
-    : batch.map(m => `[${[m.label ?? m.message_id ?? '系统说明', m.sender_name, m.create_time].filter(Boolean).join(' ')}]\n${clip(m.content)}`).join('\n\n')
+    : batch.map(m => `[${head(m).filter(Boolean).join(' ')}]\n${clip(m.content)}`).join('\n\n')
   pushing = { batch, busy, pushId: `${Date.now()}` }
   if (!busy) {
     rmSync(P.stopFlag, { force: true })
@@ -297,6 +313,7 @@ function deliver() {
       msg_type: first.msg_type ?? 'text',
       create_time: first.create_time ?? '',
       merged: String(batch.length),
+      ...(external ? { trust: 'external' } : {}),
       ...(wakeTries && !busy ? { retry: String(wakeTries) } : {}),
     },
   })}\n`)
@@ -311,13 +328,14 @@ function onAck(pushId) {
   for (const m of batch) {
     if (m.notice) continue
     S.active.push(m.message_id)
-    S.delivered[m.message_id] = { chat: m.chat, at: Date.now() }
+    S.delivered[m.message_id] = { chat: m.chat, at: Date.now(), ...(m.external ? { external: true } : {}) }
     react(m.message_id, 'active')
   }
   log(`${busy ? '忙时送出' : '已送出'} ${batch.length} 条：${batch.map(m => (m.notice ? '说明' : `${m.message_id}（创建→送出 ${ago(m.createMs)}ms）`)).join(' ')}`)
   if (busy) {
-    // 会话正在跑，Claude Code 在下一次工具调用前后把它带进这一轮，不用等唤醒；它是新指令，同样恢复「停」暂停的定时
-    S.schedulesPaused = false
+    // 会话正在跑，Claude Code 在下一次工具调用前后把它带进这一轮，不用等唤醒；白名单的消息是新指令，同样恢复「停」暂停的定时
+    if (batch.some(m => !m.notice && !m.external)) S.schedulesPaused = false
+    else plainInjected++
     save()
     refreshCard()
     deliver()
@@ -355,7 +373,7 @@ function notWoken() {
 function enqueue(item) {
   S.queue.push(item)
   save()
-  if (!item.notice) log(`入队 ${item.message_id}：创建→入队 ${ago(item.createMs)}ms，忙 ${S.busy}，桥 ${Boolean(bridge)}`)
+  if (!item.notice) log(`入队${item.external ? '（外部发送者）' : ''} ${item.message_id}：创建→入队 ${ago(item.createMs)}ms，忙 ${S.busy}，桥 ${Boolean(bridge)}`)
   deliver()
   if (!item.notice && !pushing?.batch.includes(item)) react(item.message_id, 'queued')
   refreshCard()
@@ -435,14 +453,17 @@ function onRecall(id) {
   }
   const d = S.delivered[id]
   if (!d) return
-  const running = S.busy && S.active.includes(id)
+  const running = S.busy && S.active.includes(id) && !d.external // 外部发送者撤回不打断这一轮
   delete S.delivered[id]
   delete S.reactions[id]
   S.active = S.active.filter(a => a !== id)
   if (!running) {
-    log(`处理完后撤回 ${id}`)
+    log(`${d.external ? '外部发送者的消息送达后撤回' : '处理完后撤回'} ${id}`)
     effect('撤回回执', () => send(d.chat, `消息 ${id} 已作废`))
-    enqueue({ notice: true, chat: d.chat, content: `消息 ${id} 已撤回、作废，那一轮已经结束，不要再按它继续做` })
+    // 外部发送者的不打断这一轮：作废说明忙时也送，要不要停下手上的事由会话自己判断
+    enqueue(d.external
+      ? { notice: true, urgent: true, chat: d.chat, content: `消息 ${id}（外部发送者）已撤回，内容作废。程序没有打断这一轮，要不要停下手上相关的事自己判断` }
+      : { notice: true, chat: d.chat, content: `消息 ${id} 已撤回、作废，那一轮已经结束，不要再按它继续做` })
     return
   }
   const peers = [...S.active]
@@ -491,9 +512,10 @@ function dayAgo() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-function accept(m, chat, isGroup) {
+/** external：白名单外、只送达的发送者，整条「停」也当普通消息 */
+function accept(m, chat, isGroup, external) {
   const s = m.sender ?? {}
-  if (m.msg_type === 'text' && (m.content ?? '').trim() === '停') return doStop(chat, '收到「停」', m.message_id)
+  if (!external && m.msg_type === 'text' && (m.content ?? '').trim() === '停') return doStop(chat, '收到「停」', m.message_id)
   enqueue({
     chat,
     chat_type: isGroup ? 'group' : 'p2p',
@@ -505,6 +527,7 @@ function accept(m, chat, isGroup) {
     msg_type: m.msg_type ?? '',
     create_time: m.create_time ?? '',
     createMs: m.create_ms,
+    ...(external ? { external: true } : {}),
   })
 }
 
@@ -515,7 +538,8 @@ function admit(m, chat, isGroup, old) {
   if (m.deleted || eventRecalled.has(m.message_id)) log(`跳过 ${m.message_id}：已撤回，创建→发现 ${ago(m.create_ms)}ms`)
   const skip = old || m.deleted || eventRecalled.has(m.message_id) || sender === me || m.msg_type === 'system'
   if (!skip) {
-    if (ALLOW.has(sender)) accept(m, chat, isGroup)
+    if (ALLOW.has(sender)) accept(m, chat, isGroup, false)
+    else if (observed(chat, isGroup)) accept(m, chat, isGroup, true)
     else log(`丢弃 ${m.message_id}：发送者 ${sender} 不在白名单（会话 ${chat}）`)
   }
   markSeen(m.message_id) // 入队落盘之后才记，崩在中间只会重收不会漏
@@ -559,7 +583,7 @@ function retryChat(chat, tries) {
   }, Math.min(RETRY_MIN_MS * 2 ** (tries - 1), RETRY_MAX_MS)).unref()
 }
 
-/** 事件里的 open_id → get 确认过的发送者 id；认过一次的发送者以后不再 get，白名单外的也直接丢 */
+/** 事件里的 open_id → get 确认过的发送者 id；认过一次的发送者以后不再 get，白名单外的也直接判（observe 会话里入队，其余丢） */
 const SENDER_CACHE_MAX = 1000
 function senderOf(openId) {
   if (!openId) return ''
@@ -574,6 +598,38 @@ function rememberSender(openId, id) {
   save()
 }
 
+/** 外部发送者的名字：事件和 get 都不带，按 open_id 查通讯录。查到的记进状态文件（最多 1000 个）；
+ * 查不到（没权限、不在通讯录范围）只在本进程里记，重启后再试，补了权限就能拿到 */
+const nameMissing = new Set()
+async function nameOf(openId) {
+  if (!openId || cfg.names?.[openId]) return cfg.names?.[openId] ?? ''
+  if (S.names?.[openId]) return S.names[openId]
+  if (nameMissing.has(openId)) return ''
+  let name = ''
+  try {
+    name = (await feishu.userName?.(openId)) ?? ''
+  } catch (e) {
+    log(`查不到 ${openId} 的名字：${e.message}`)
+  }
+  if (!name) {
+    nameMissing.add(openId)
+    return ''
+  }
+  S.names ??= {}
+  S.names[openId] = name
+  const keys = Object.keys(S.names)
+  if (keys.length > SENDER_CACHE_MAX) delete S.names[keys[0]]
+  save()
+  return name
+}
+
+/** 只送达的会话里白名单外的发送者：补上名字再进门 */
+async function withName(m, chat, isGroup) {
+  const id = m.sender?.id
+  if (!id || m.sender.name || ALLOW.has(id) || id === me || !observed(chat, isGroup)) return m
+  return { ...m, sender: { ...m.sender, name: await nameOf(id) } }
+}
+
 /** 事件直入：发送者已知（在白名单或 get 认过）就用事件内容判；没见过或缺字段，按 get 到的发送者判；失败立即补拉这个会话 */
 async function onEvent({ chat, chatType, message: m }) {
   if (!m?.message_id) return schedule(chat)
@@ -582,7 +638,7 @@ async function onEvent({ chat, chatType, message: m }) {
   const isGroup = chatType !== 'p2p'
   try {
     const known = senderOf(m.sender?.id)
-    if (known) admit({ ...m, sender: { ...m.sender, id: known } }, chat, isGroup)
+    if (known) admit(await withName({ ...m, sender: { ...m.sender, id: known } }, chat, isGroup), chat, isGroup)
     else {
       const begin = Date.now()
       const got = await feishu.getMessage(id)
@@ -590,7 +646,7 @@ async function onEvent({ chat, chatType, message: m }) {
       log(`get 确认 ${id}：${Date.now() - begin}ms，发送者 ${got.sender?.id}`)
       rememberSender(m.sender?.id, got.sender?.id)
       if (got.content !== m.content) log(`事件内容和 get 不一致 ${id}：类型 ${got.msg_type}，长度 ${m.content.length} / ${got.content.length}`)
-      admit(got, chat, isGroup)
+      admit(await withName(got, chat, isGroup), chat, isGroup)
     }
   } catch (e) {
     log(`事件入队失败 ${id}，立即补拉：${e.message}`)
