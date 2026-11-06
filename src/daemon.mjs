@@ -5,7 +5,7 @@
  * 收：长连接事件带的内容直接入队；启动 / 连上时和定时全量补漏只补漏。以已读记录为准，不漏不重。
  * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
  *   事件里的发送者对不上 allow 时（机器人只有 open_id），按 get 单条拿到的发送者再判一次。
- * 只送达（observe）：配置里列出的群（和开了 dms 时的私信）里，白名单外的人发的消息也入队，标成外部发送者（meta.trust=external）。
+ * 只送达（observe）：observe 为 true 时机器人在的全部会话，写成 { chats, dms } 时列出的群（和开了 dms 时的私信）里，白名单外的人发的消息也入队，标成外部发送者（meta.trust=external）。
  *   和白名单的一样忙时送达，但不授权：「停」当普通消息；撤回只从队列撤下，已送出的不拦工具、不杀进程，只补发作废说明（忙时也送）；
  *   送达不解除「停」暂停的定时。合并时不和白名单消息混在一条。
  * 送：闲时把队列里同一会话的消息合并成一条，经桥（bridge.mjs）送出，桥确认后出队。
@@ -36,10 +36,12 @@ mkdirSync(P.dir, { recursive: true })
 const adapter = process.env.FEISHU_ADAPTER ? pathToFileURL(process.env.FEISHU_ADAPTER).href : './feishu.mjs'
 const feishu = (await import(adapter)).connect(cfg, msg => log(msg))
 const ALLOW = new Set(cfg.allow)
+// observe: true 是机器人在的全部群和私信；写成 { chats, dms } 时只收这些
+const OBSERVE_ALL = cfg.observe === true
 const OBSERVE_CHATS = new Set(cfg.observe?.chats ?? [])
 const OBSERVE_DMS = Boolean(cfg.observe?.dms)
 /** 这个会话里白名单外的人发的消息也送（只送达、不授权） */
-const observed = (chat, isGroup) => OBSERVE_CHATS.has(chat) || (!isGroup && OBSERVE_DMS)
+const observed = (chat, isGroup) => OBSERVE_ALL || OBSERVE_CHATS.has(chat) || (!isGroup && OBSERVE_DMS)
 const SWEEP_MS = (cfg.sweepSec ?? 600) * 1000
 const BUSY_TIMEOUT_MS = (cfg.busyTimeoutSec ?? 180) * 1000
 const RECALL_POLL_MS = (cfg.recallPollSec ?? 60) * 1000

@@ -835,3 +835,33 @@ test('只送达：外部发送者的消息不解除「停」暂停的定时，�
   await until(() => r.pushes.length === 4, '恢复后补发')
   assert.match(r.pushes[3].content, /暂停中/)
 }, OBSERVE))
+
+const strangerEvent = (r, m, chat, chatType) => writeFileSync(join(r.dir, 'event'), JSON.stringify({ chat, chatType, message: { ...m, sender: { id: m.sender.id, sender_type: 'user' } } }))
+
+test('只送达：observe=true 时没列出的群和私信里白名单外的人都照送', () => rig(async r => {
+  r.messages.push({ ...stranger('om_g', 'ou_t7', '测试丁'), chat_id: 'oc_other' }, { ...stranger('om_p', 'ou_t8', '测试戊'), chat_id: 'oc_dm' })
+  r.write()
+  strangerEvent(r, r.messages[0], 'oc_other', 'group')
+  await until(() => r.pushes.length === 1, '没列出的群送达')
+  assert.equal(r.pushes[0].meta.chat_id, 'oc_other')
+  assert.equal(r.pushes[0].meta.trust, 'external')
+  r.hook('UserPromptSubmit')
+  strangerEvent(r, r.messages[1], 'oc_dm', 'p2p')
+  await until(() => r.pushes.length === 2, '私信忙时送达')
+  assert.equal(r.pushes[1].meta.chat_type, 'p2p')
+  assert.equal(r.pushes[1].meta.trust, 'external')
+  assert.doesNotMatch(r.log(), /丢弃/)
+}, { observe: true, recallPollSec: 0 }))
+
+test('只送达：没配 observe 时群里和私信里白名单外的照丢', () => rig(async r => {
+  r.messages.push({ ...stranger('om_g', 'ou_t7', '测试丁'), chat_id: 'oc_other' }, { ...stranger('om_p', 'ou_t8', '测试戊'), chat_id: 'oc_dm' })
+  r.write()
+  strangerEvent(r, r.messages[0], 'oc_other', 'group')
+  await until(() => r.log().includes('丢弃 om_g'), '群里丢弃')
+  strangerEvent(r, r.messages[1], 'oc_dm', 'p2p')
+  await until(() => r.log().includes('丢弃 om_p'), '私信丢弃')
+  r.add(stranger('om_x', 'ou_t9', '测试己'))
+  await until(() => r.log().includes('丢弃 om_x'), '补漏路径丢弃')
+  await sleep(200)
+  assert.equal(r.pushes.length, 0)
+}, { recallPollSec: 0 }))
