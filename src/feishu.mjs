@@ -98,6 +98,11 @@ export function connect(cfg, log) {
       const data = ok(await client.im.message.get({ path: { message_id: id } }))
       return data.items?.[0] ? normal(data.items[0]) : null
     },
+    /** 用户 open_id → 姓名；要通讯录读用户基本信息的权限，没有就抛错 */
+    async userName(openId) {
+      const data = ok(await client.contact.user.get({ path: { user_id: openId }, params: { user_id_type: 'open_id' } }))
+      return data?.user?.name ?? ''
+    },
     async sendText(chat, text) {
       const uuid = randomUUID()
       return withRetry(async () => ok(await client.im.message.create({

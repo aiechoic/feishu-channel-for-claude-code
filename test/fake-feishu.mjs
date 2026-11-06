@@ -1,4 +1,4 @@
-// 假飞书：消息来自 $FAKE/messages.json；$FAKE/fire 触发不带内容的事件，$FAKE/event 触发带内容的事件（{ chat, message }），$FAKE/get-fail 让 get 失败，$FAKE/recall 触发撤回事件；发出去的动作记到文件
+// 假飞书：消息来自 $FAKE/messages.json；$FAKE/fire 触发不带内容的事件，$FAKE/event 触发带内容的事件（{ chat, message }），$FAKE/get-fail 让 get 失败，$FAKE/recall 触发撤回事件，$FAKE/names.json 是 userName 查得到的名字；发出去的动作记到文件
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 
 const dir = process.env.FAKE
@@ -24,6 +24,12 @@ export function connect() {
       appendFileSync(`${dir}/get.log`, `${id}\n`)
       if (existsSync(`${dir}/get-fail`)) throw new Error('EOF')
       return all().find(m => m.message_id === id) ?? null
+    },
+    async userName(openId) {
+      appendFileSync(`${dir}/names.log`, `${openId}\n`)
+      const names = existsSync(`${dir}/names.json`) ? JSON.parse(readFileSync(`${dir}/names.json`, 'utf8')) : {}
+      if (!(openId in names)) throw new Error('无权查通讯录')
+      return names[openId]
     },
     async sendText(chat, text) {
       appendFileSync(`${dir}/sent.txt`, `${chat}|${text}\n`)
