@@ -4,9 +4,11 @@ import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { configFile, HERE } from '../src/common.mjs'
 
+const codexMode = process.argv.includes('--codex')
+process.argv = process.argv.filter(a => a !== '--codex')
 const cfgFile = configFile()
 const dir = dirname(cfgFile)
-if (process.argv.includes('--codex')) {
+if (codexMode) {
   // Generate an isolated fragment; never overwrite a user's global Codex configuration.
   const toml = `[mcp_servers.feishu]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([join(HERE, 'bridge.mjs')])}\n\n[mcp_servers.feishu.env]\nFEISHU_CHANNEL_CONFIG = ${JSON.stringify(cfgFile)}\nFEISHU_CODEX_TOOLS_ONLY = "1"\n`
   writeFileSync(join(dir, 'codex.config.toml'), toml)

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -9,7 +8,6 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { paths } from '../src/common.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 async function until(fn) {
@@ -36,7 +34,11 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
   const start = () => spawn(process.execPath, [join(root, 'src/codex.mjs'), cfgFile], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   try {
     supervisor = spawn(process.execPath, [join(root, 'src/supervise.mjs')], { env, stdio: 'ignore', windowsHide: true })
-    await until(() => read('cli_example.log').includes('常驻进程启动'))
+    await until(() => read('cli_example.log').includes('全量补漏结束'))
+    add('om_a1', 'one')
+    add('om_a2', 'two')
+    add('om_a3', 'three')
+    await until(() => (read('cli_example.log').match(/入队/g) ?? []).length >= 3)
     receiver = start()
     let errors = ''
     receiver.stderr.on('data', d => { errors += d })
@@ -45,8 +47,9 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
     client = new Client({ name: 'test', version: '1' })
     await client.connect(transport)
     await sleep(100)
-    add('om_a', 'hello')
     await until(() => calls().some(m => m.method === 'turn/start'))
+    const merged = calls().find(m => m.method === 'turn/start').params.input[0].text
+    assert.match(merged, /om_a1,om_a2,om_a3/)
     add('om_b', 'busy addition')
     await until(() => calls().some(m => m.method === 'turn/steer'))
     add('om_bad', 'ignored', 'ou_bad')
@@ -63,19 +66,20 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
     writeFileSync(join(dir, 'recall'), 'om_c')
     await until(() => calls().filter(m => m.method === 'turn/interrupt').length === 2)
     await sleep(200)
-    // Complete the fake turn created for the recall notice, then schedule while idle.
-    const peer = connect(paths(cfg).sock)
-    peer.on('error', () => {})
-    peer.end(JSON.stringify({ t: 'hook', event: 'Stop' }) + '\n')
+    await until(() => (read('cli_example.log').match(/标闲：Stop/g) ?? []).length >= 3)
     const schedule = await client.callTool({ name: 'schedule_add', arguments: { kind: 'once', at: new Date(Date.now() + 1000).toISOString(), text: 'scheduled wake' } })
     assert.ok(!schedule.isError)
     await until(() => calls().some(m => JSON.stringify(m.params.input ?? []).includes('scheduled wake')))
+    assert.equal(calls().find(m => JSON.stringify(m.params.input ?? []).includes('scheduled wake')).method, 'turn/start')
     receiver.kill()
     await new Promise(ok => receiver.once('exit', ok))
     receiver = start()
     receiver.stderr.on('data', d => { errors += d })
     await until(() => calls().some(m => m.method === 'thread/resume'))
     assert.equal(errors, '')
+  } catch (error) {
+    console.error(read('cli_example.log').slice(-4000))
+    throw error
   } finally {
     await client?.close()
     receiver?.kill()

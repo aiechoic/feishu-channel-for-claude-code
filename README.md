@@ -4,6 +4,47 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 把飞书的群和私信送进运行中的 Claude Code 会话：有消息才唤醒，忙时补充立刻送进这一轮，能远程喊停，飞书里看得到状态，还能定时唤醒。
 
+## Codex
+
+需要 Codex CLI 的 app-server 接口。Windows 本机协议验证使用 CLI 0.166.0、共享 daemon 0.167.0；模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。真实飞书到真实 Codex 的完整验收仍需机器人凭据与人工发送测试消息。
+
+安装依赖仍用 `npm ci --ignore-scripts`。配置沿用同一份 JSON，secret 放 `appSecretFile`，只放行用户和主程。不要与另一个使用同一机器人的常驻进程同时运行。
+
+在配置中添加 `codex`：
+
+```json
+{
+  "codex": {
+    "threadId": "目标会话的 UUID",
+    "cwd": "本机工作目录"
+  }
+}
+```
+
+`threadId` 指向当前窗口时，先在该窗口确认会话 UUID，再启动。没有 `threadId` 时创建专用会话，并把 UUID 保存在 `<stateDir>/<appId>-codex.json`；再次启动恢复它。新窗口要改 `threadId` 后重启接收端。不要将同一 UUID 同时交给独立 app-server 和共享 daemon 驱动。
+
+```bash
+node bin/setup.mjs --codex /path/to/config.json
+node src/codex.mjs /path/to/config.json
+```
+
+`setup --codex` 生成独立 `codex.config.toml` 片段，不覆盖用户全局配置。连接已有窗口前，把片段中的 `mcp_servers.feishu` 合入该工作区受信任的 `.codex/config.toml`，在 Codex 中重新加载 MCP（或重开窗口）。片段中的 MCP 只提供 `reply`、`schedule_*`，不会冒充消息接收端。新建专用会话时接收端自动传入这份 MCP 配置。模型和权限沿用目标会话；新建会话可显式配 `codex.model`，不自动放宽权限。
+
+默认启动 `codex app-server proxy` 连接本机共享 daemon。proxy 是字节通道：先做 WebSocket HTTP Upgrade，再发 WebSocket JSON-RPC，不能直接写 JSONL。`turn/start` 用于闲时唤醒，`turn/steer` 带当前 turn ID 用于忙时补充，`turn/interrupt` 用于停和处理中撤回。回到 daemon 的 ack 在 RPC 成功响应后发出，不把 CLI 退出码当成唤醒证明。源消息 ID、合并数、发送者和外部信任标记保留在输入中。
+
+需要独立进程时显式设置 `codex.args` 为 `["app-server", "--listen", "stdio://"]`，并去掉指向现有窗口的 `threadId`。`codex.command` 可以指定实际的 Codex 可执行文件路径。
+
+与 Claude Code 的差别和边界：
+
+- 忙闲和工具名来自 app-server 的 turn/item 事件，不安装 Claude Code hooks，也不把其 hook 输出格式当作 Codex 契约。接收端每 10 秒上报存活心跳。
+- 忙时的 RPC 成功代表服务端接受补充，不代表模型此刻已经读到；具体应用时机由 Codex 的安全边界决定。
+- 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`。没有实现可在执行之前同步拒绝每次工具调用的 Codex PreToolUse 门禁；收到已开始工具事件后重发中断属于补偿措施。真实长命令及后续工具被取消的行为必须在目标 Codex 版本验收，不能用模拟测试替代。
+- 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
+- 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
+- 白名单规则保持不变。配置 `observe` 时，白名单外消息标明仅供观察，不能当作执行授权。本部署应不设置 `observe`。
+
+接收端在前台运行，Ctrl+C 只关接收端与它的 proxy，不停止共享 Codex daemon。不要杀共享 Codex daemon来停止飞书。要关闭机器人长连接，停止该配置对应的 supervise 和 daemon 两个进程；不要影响其他配置。
+
 ## 风险：先读这一段
 
 - 依赖 Claude Code 的研究预览功能 Channels，协议和参数都可能变动。

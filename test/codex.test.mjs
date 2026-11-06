@@ -65,4 +65,15 @@ test('merged metadata and source are preserved; schedule contents have distinct 
   m.meta.message_id = 'om_a,om_b,om_c'
   assert.match(channelInput(m)[0].text, /om_a,om_b,om_c/)
   assert.notEqual(deliveryKey(message('schedule one')), deliveryKey(message('schedule two')))
+  assert.match(channelInput({ ...m, meta: { ...m.meta, trust: 'external' } })[0].text, /不授权执行/)
+})
+test('history marker recovers accepted delivery after local acknowledgement file is lost', async () => {
+  const rpc = new FakeRpc(), m = message(), key = deliveryKey(m)
+  rpc.request = async method => {
+    assert.equal(method, 'thread/read')
+    return { thread: { turns: [{ items: [{ type: 'userMessage', content: [{ type: 'text', text: `[feishu-delivery:${key}]` }] }] }] } }
+  }
+  const s = new CodexSession(rpc, 'thread1')
+  await s.accept(m)
+  assert.ok(s.accepted.has(key))
 })

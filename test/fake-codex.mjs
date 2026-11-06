@@ -22,4 +22,12 @@ createInterface({ input: process.stdin }).on('line', line => {
     notify('turn/completed', { turn: { id: active, status: 'interrupted' } })
     active = null
   }
+  if (m.method === 'turn/start' && JSON.stringify(m.params.input).includes('撤回')) {
+    const turn = active
+    setTimeout(() => {
+      if (active !== turn) return
+      notify('turn/completed', { turn: { id: turn, status: 'completed' } })
+      active = null
+    }, 100)
+  }
 })

@@ -59,8 +59,11 @@ const options = {
 }
 // Keep model and approval policy inherited unless explicitly configured by the operator.
 if (cfg.codex?.model) options.model = cfg.codex.model
-const { thread } = await rpc.request(saved.threadId ? 'thread/resume' : 'thread/start', { ...options, ...(saved.threadId ? { threadId: saved.threadId } : {}) })
-session = new CodexSession(rpc, thread.id, saved.accepted)
+const attached = cfg.codex?.threadId
+const { thread } = await rpc.request(attached || saved.threadId ? 'thread/resume' : 'thread/start', attached
+  ? { threadId: attached, excludeTurns: false }
+  : { ...options, ...(saved.threadId ? { threadId: saved.threadId } : {}) })
+session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.accepted : [])
 session.turnId = thread.turns?.findLast(t => t.status === 'inProgress')?.id ?? null
 session.on('accepted', persist)
 session.on('failure', e => { console.error(e.message); exit(1) })
@@ -74,6 +77,7 @@ function dial() {
   c.on('connect', () => {
     link = c
     send({ t: 'hello', claudePid: rpc.child.pid, bridgePid: process.pid })
+    if (session.turnId) send({ t: 'hook', event: 'UserPromptSubmit' })
   })
   createInterface({ input: c }).on('error', () => {}).on('line', async line => {
     try {
