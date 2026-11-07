@@ -11,7 +11,10 @@
  * 送：闲时把队列里同一会话的消息合并成一条，经桥（bridge.mjs）送出，桥确认后出队。
  *   忙时发送者的消息也立刻送，Claude Code 在下一次工具调用前后带进这一轮（标成外部内容）；说明、定时和停止标记在时等闲。
  *   会话没就绪时 Claude Code 会静默丢掉通知，所以送出后等到 hook 才算唤醒，等不到退回队列重发。
- * 忙闲：hook.mjs 上报。忙且心跳超时、且没有活着的工具进程时按闲处理。
+ *   连续 wakeRetryMax 次没唤醒就停发，消息留在队列，日志和状态卡报警；之后收到任何 hook 或新会话连上时恢复。
+ * 忙闲：hook.mjs 上报。PreToolUse 之后还没等到同一 tool_use_id 的 PostToolUse / PostToolUseFailure 时算忙（等用户回答、等权限确认也是），
+ *   心跳超时不判闲；没配对的 PreToolUse 由 Stop、UserPromptSubmit 清掉，超过 toolWaitMaxSec 也不再算数。
+ *   忙且心跳超时、没有等着的工具、也没有活着的工具进程时按闲处理。
  * 停：白名单发送者整条消息就是「停」时，清空队列、写停止标记、杀当前工具进程。
  * 撤回：im.message.recalled_v1 事件，低频轮询兜底。排队中的撤下；正在处理的打断这一轮；已处理完的只作废。都不暂停定时。
  * 定时：到点进同一条队列；会话不在线时等上线补发，过了宽限期只回报跳过。
@@ -60,6 +63,8 @@ const RETRY_MIN_MS = (cfg.retrySec ?? 5) * 1000
 const RETRY_MAX_MS = 60_000
 const WAKE_TIMEOUT_MS = (cfg.wakeTimeoutSec ?? 20) * 1000
 const WAKE_TIMEOUT_MAX_MS = 300_000
+const WAKE_RETRY_MAX = cfg.wakeRetryMax ?? 10
+const TOOL_WAIT_MAX_MS = (cfg.toolWaitMaxSec ?? 86_400) * 1000
 const EMOJI = { queued: 'GLANCE', active: 'OneSecond', done: 'CheckMark', stopped: 'CrossMark' }
 
 function log(msg) {
@@ -199,20 +204,32 @@ function setIdle(why, finished) {
   deliver()
 }
 
+/** 新一轮开始时上一轮没配对的 PreToolUse（丢了 Post 的工具）不再算忙 */
+function dropUnpaired(why) {
+  const left = Object.values(S.inflight)
+  if (!left.length) return
+  log(`${why}：清掉 ${left.length} 个没等到 PostToolUse 的工具 ${left.map(t => t.tool).join(' ')}`)
+  S.inflight = {}
+  tool = ''
+}
+
 function onHook(h) {
   log(`hook ${h.event}${h.tool ? ` ${h.tool}` : ''}${h.blocked ? '（已拦）' : ''}`)
+  const resumed = resumeWake()
   const systemWake = waking?.batch.every(m => m.notice || m.external) // 系统说明、定时、外部发送者唤醒的一轮不算新指令
   woke() // 只在闲时送出，送出后的任何 hook 都说明会话收到了
   switch (h.event) {
     case 'UserPromptSubmit':
       // 停止标记在、会话还忙：是「停」或撤回打断之前忙时送出的补充这时才进会话，不算新指令，标记留着让这一轮结束
       if (S.busy && existsSync(P.stopFlag)) {
+        dropUnpaired(h.event)
         setBusy(h.event)
         break
       }
       // 忙时送进去的只有外部发送者的消息或说明时，这次 UserPromptSubmit 是它们触发的，也不算新指令
       if (!systemWake && !(S.busy && plainInjected)) S.schedulesPaused = false
       plainInjected = 0
+      dropUnpaired(h.event)
       rmSync(P.stopFlag, { force: true })
       setBusy(h.event)
       deliver() // 停止标记清掉了，等着的消息可以忙时送
@@ -240,6 +257,7 @@ function onHook(h) {
       setIdle(h.event, true)
       break
   }
+  if (resumed) deliver()
 }
 
 /** 当前前台命令工具（Bash / PowerShell）的进程：Claude Code 的子 shell 里，开始时间不早于那次 PreToolUse 的最新一个 */
@@ -256,8 +274,23 @@ function killTree(root) {
   log(`已杀工具进程树 ${proc.killTree(root).join(' ')}`)
 }
 
+/** 还在等结果的前台工具（PreToolUse 之后没有 Post）；超过 toolWaitMaxSec 的当作丢了 Post，不算 */
+function waitingTools() {
+  const now = Date.now()
+  return Object.values(S.inflight).filter(t => now - t.at < TOOL_WAIT_MAX_MS)
+}
+
+let holding = '' // 心跳超时但因等着的工具没判闲时记一次日志
 function watchdog() {
   if (!S.busy || Date.now() - beat < BUSY_TIMEOUT_MS) return
+  const waiting = waitingTools()
+  if (waiting.length) {
+    const what = waiting.map(t => t.tool).join(' ')
+    if (holding !== what) log(`心跳超时，但工具 ${what} 还没结束（等用户回答或权限确认），仍按忙`)
+    holding = what
+    return
+  }
+  holding = ''
   if (toolProcess()) {
     beat = Date.now()
     return
@@ -272,6 +305,19 @@ let pushing = null
 let plainInjected = 0
 let waking = null // { batch, timer }：已送出、等会话唤醒
 let wakeTries = 0
+let wakeHalted = false // 连续 WAKE_RETRY_MAX 次没唤醒：闲时不再送，等 hook 或新会话
+const HALT_WARNING = '会话一直没唤醒，已停止重发'
+
+/** 收到 hook 或新会话连上：会话还活着，停发的恢复送出（调用方接着会 deliver） */
+function resumeWake() {
+  if (!wakeHalted) return false
+  wakeHalted = false
+  wakeTries = 0
+  warnings.delete(HALT_WARNING)
+  log(`会话有动静了，恢复送出（排队 ${S.queue.length} 条）`)
+  refreshCard()
+  return true
+}
 
 function clip(text) {
   return text.length <= CLIP ? text : `${text.slice(0, CLIP)} …[已截断，全文按 message_id 用 lark-cli 拉]`
@@ -282,6 +328,7 @@ function clip(text) {
 function deliver() {
   if (!bridge || pushing || waking || !S.queue.length) return
   const busy = S.busy
+  if (wakeHalted && !busy) return
   if (busy && existsSync(P.stopFlag)) return
   const pool = busy ? S.queue.filter(m => !m.notice || m.urgent) : S.queue
   if (!pool.length) return
@@ -366,7 +413,13 @@ function notWoken() {
   for (const id of ids) delete S.delivered[id]
   S.queue.unshift(...batch)
   batch.filter(m => !m.notice).forEach(m => react(m.message_id, 'queued'))
-  log(`${batch.length} 条送出后没有唤醒会话，退回队列，第 ${wakeTries} 次重发`)
+  if (wakeTries >= WAKE_RETRY_MAX) {
+    wakeHalted = true
+    warnings.add(HALT_WARNING)
+    log(`${batch.length} 条送出后没有唤醒会话，退回队列；连续 ${wakeTries} 次没唤醒，停止重发，排队 ${S.queue.length} 条等会话下一次 hook`)
+  } else {
+    log(`${batch.length} 条送出后没有唤醒会话，退回队列，第 ${wakeTries} 次重发`)
+  }
   setIdle('未唤醒', false)
 }
 
@@ -773,6 +826,8 @@ function onLine(sock, line) {
       deliver()
     } else {
       S.claudePid = m.claudePid
+      resumeWake()
+      wakeTries = 0
       setIdle('新会话', false)
     }
   } else if (m.t === 'schedule') {

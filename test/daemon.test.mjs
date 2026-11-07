@@ -476,6 +476,67 @@ test('送出后会话没唤醒：退回队列重发，唤醒后不再重发', ()
   await until(() => r.file('reactions.txt').includes('om_1 CheckMark'), '完成表情')
 }, { wakeTimeoutSec: 0.1 }))
 
+test('等用户回答（PreToolUse 后没有 Post）：心跳超时仍按忙，不判闲、不重发；消息忙时送出一次；Post 回来后照常超时判闲', () => rig(async r => {
+  r.hook('PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'ask1' }) // PreToolUse 自己标忙；前面再发一个 hook 时看门狗可能在两次之间判闲
+  await until(() => r.log().includes('工具 AskUserQuestion 还没结束'), '心跳超时但仍按忙')
+  r.add(msg('om_1'))
+  await until(() => r.pushes.length === 1, '忙时送出')
+  assert.equal(r.pushes[0].meta.retry, undefined)
+  await sleep(800) // 心跳超时和唤醒超时都过了好几轮
+  assert.equal(r.pushes.length, 1, '等用户回答期间不重发')
+  assert.doesNotMatch(r.log(), /标闲：心跳超时|没有唤醒会话/)
+  assert.equal(r.log().split('还没结束').length, 2, '仍按忙只记一次日志')
+  r.hook('PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'ask1' })
+  await until(() => r.log().includes('标闲：心跳超时'), 'Post 回来后照常超时判闲')
+}, { busyTimeoutSec: 0.1, wakeTimeoutSec: 0.1 }))
+
+test('丢了 Post 的工具不会一直卡在忙：Stop、UserPromptSubmit 清掉没配对的 PreToolUse；超过 toolWaitMaxSec 也不再算', async () => {
+  for (const [how, extra] of [['Stop', {}], ['UserPromptSubmit', {}], ['超时', { toolWaitMaxSec: 0.3 }]]) {
+    const r = new Rig({ busyTimeoutSec: 0.1, ...extra })
+    try {
+      await r.startDaemon()
+      await r.bridge()
+      r.hook('PreToolUse', { tool_name: 'Read', tool_use_id: 'lost' })
+      if (how === 'Stop') {
+        r.hook('Stop')
+        r.hook('PreToolUse', { tool_name: 'Read', tool_use_id: 'next' }) // 下一轮：配对的工具调用，只有清掉了 lost 才会超时判闲
+        r.hook('PostToolUse', { tool_name: 'Read', tool_use_id: 'next' })
+      } else if (how === 'UserPromptSubmit') {
+        r.hook('UserPromptSubmit')
+        await until(() => r.log().includes('清掉 1 个没等到 PostToolUse 的工具 Read'), `${how} 清掉`)
+      }
+      await until(() => r.log().includes('标闲：心跳超时'), `${how}：心跳超时判闲`)
+    } finally { r.close() }
+  }
+})
+
+test('唤醒重发到上限停发：消息留在队列、日志和卡片报警；下一次 hook 恢复送出', () => rig(async r => {
+  r.add(msg('om_1'))
+  await until(() => r.log().includes('连续 3 次没唤醒，停止重发'), '到上限停发')
+  assert.equal(r.pushes.length, 3)
+  await until(() => r.file('card.txt').includes('会话一直没唤醒，已停止重发'), '卡片报警')
+  r.add(msg('om_2'))
+  await until(() => r.file('reactions.txt').includes('om_2 GLANCE'), '新消息排队')
+  await sleep(500)
+  assert.equal(r.pushes.length, 3, '停发后不再送')
+  assert.match(r.file('cli_me-state.json'), /om_1/, '消息留在队列')
+  r.hook('PreToolUse', { tool_name: 'Read' }) // 会话有动静：忙时送出
+  await until(() => r.log().includes('恢复送出（排队 2 条）'), '恢复')
+  await until(() => r.pushes.length === 4, '恢复后送出')
+  assert.equal(r.pushes[3].meta.message_id, 'om_1,om_2')
+  await until(() => !r.file('card.txt').split('\n').filter(Boolean).at(-1).includes('会话一直没唤醒'), '卡片报警撤下')
+}, { wakeTimeoutSec: 0.05, wakeRetryMax: 3 }))
+
+test('唤醒重发停发后闲时收到 hook（Stop）也恢复，按闲时送出等唤醒', () => rig(async r => {
+  r.add(msg('om_1'))
+  await until(() => r.log().includes('停止重发'), '到上限停发')
+  r.hook('Stop')
+  await until(() => r.pushes.length === 3, '恢复后闲时送出')
+  assert.equal(r.pushes[2].meta.retry, undefined, '恢复后重新计数')
+  r.hook('UserPromptSubmit')
+  await until(() => r.log().split('已唤醒').length === 2, '唤醒')
+}, { wakeTimeoutSec: 0.1, wakeRetryMax: 2 }))
+
 test('撤回事件：排队中的不送，比轮询先生效', async () => {
   const r = new Rig({ recallPollSec: 0 })
   try {
