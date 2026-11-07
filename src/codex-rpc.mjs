@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline'
 import { Duplex } from 'node:stream'
 import WebSocket from 'ws'
 
-/** One owned app-server, or an explicitly selected shared-daemon proxy. */
+/** 连接专用 app-server，或显式选择的共享 daemon 代理。 */
 export class CodexRpc extends EventEmitter {
   constructor(command = 'codex', args = ['app-server', 'proxy']) {
     super()
@@ -25,10 +25,10 @@ export class CodexRpc extends EventEmitter {
         if (m.error) p.reject(new Error(m.error.message))
         else p.resolve(m.result)
       } else if (m.method && m.id === undefined) this.emit('notification', m)
-      // Approvals belong to the user's Codex UI; this adapter never grants them.
+      // 审批由用户的 Codex 界面处理，适配层不代批。
     }
     if (args.includes('proxy')) {
-      // proxy carries HTTP Upgrade + masked WebSocket frames, not JSONL.
+      // proxy 承载 HTTP Upgrade 和带掩码的 WebSocket 帧，不直接接收 JSONL。
       this.ws = new WebSocket('ws://localhost/', { handshakeTimeout: 30_000, createConnection: () => {
         const stream = Duplex.from({ readable: this.child.stdout, writable: this.child.stdin })
         stream.setTimeout = stream.setNoDelay = stream.setKeepAlive = () => stream

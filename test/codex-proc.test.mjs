@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { test } from 'node:test'
 import proc from '../src/proc.mjs'
-import { CodexCommands, commandMatches, shellWords, windowsWords } from '../src/codex-proc.mjs'
+import { CodexCommands, commandMatches, finalCommand, shellWords, windowsWords } from '../src/codex-proc.mjs'
 
 const quote = s => "'" + s.replaceAll("'", "'\\''") + "'"
 test('shell display and Windows argv parse quotes without evaluating command text', () => {
@@ -32,18 +33,23 @@ test('stop matches a single current-turn command, retains yielded sessions, refu
   assert.deepEqual(c.stop('own'), [11])
   assert.deepEqual(killed, [11])
 })
-test('real process cleanup kills the owned yielded shell and leaves a sibling shell running', async () => {
+test('real process cleanup kills the owned yielded shell and leaves a sibling shell running', { skip: process.platform === 'darwin' && 'macOS 无 /proc 进程归属实现，仅支持原生轮次中断' }, async () => {
   const win = process.platform === 'win32'
   const shell = win ? 'powershell.exe' : 'bash'
   const own = win ? "Write-Output 'codex-owned-example'; Start-Sleep -Seconds 60" : "echo codex-owned-example; sleep 60"
   const other = win ? "Write-Output 'codex-sibling-example'; Start-Sleep -Seconds 60" : "echo codex-sibling-example; sleep 60"
   const args = body => win ? ['-NoProfile', '-Command', body] : ['-lc', body]
-  const c = new CodexCommands(proc, process.pid)
+  const c = new CodexCommands(proc, process.pid, process.platform, Date.now, { threadId: 'thread_owned' })
   c.observe('item/started', { turnId: 'own', item: { id: 'cmd', type: 'commandExecution', command: `${shell} ${win ? '-NoProfile -Command' : '-lc'} ${quote(own)}` } })
-  const child = spawn(shell, args(own), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
-  const sibling = spawn(shell, args(other), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(shell, args(own), { env: { ...process.env, CODEX_THREAD_ID: 'thread_owned' }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const sibling = spawn(shell, args(other), { env: { ...process.env, CODEX_THREAD_ID: 'thread_sibling' }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   try {
     await Promise.all([once(child.stdout, 'data'), once(sibling.stdout, 'data')])
+    if (!win) {
+      for (let i = 0; i < 100 && [child, sibling].some(p => proc.info(p.pid)?.name !== 'sleep'); i++) await sleep(10)
+      assert.equal(proc.info(child.pid)?.name, 'sleep', '真实 bash 已被 exec 为 sleep，不能只测仍是 shell 的情况')
+      assert.equal(proc.info(sibling.pid)?.name, 'sleep')
+    }
     c.observe('item/completed', { turnId: 'own', item: { id: 'cmd', type: 'commandExecution', command: own, exitCode: null } })
     const exited = once(child, 'exit')
     assert.ok(c.stop('own').includes(child.pid))
@@ -53,4 +59,32 @@ test('real process cleanup kills the owned yielded shell and leaves a sibling sh
   } finally {
     for (const p of [child, sibling]) if (p.exitCode === null) proc.killTree(p.pid)
   }
+})
+test('exec 后要求本线程标识与唯一 argv；缺归属或有歧义时明确记录且不杀', () => {
+  const display = "bash -lc 'echo own; sleep 60'"
+  assert.deepEqual(finalCommand(display), ['sleep', '60'])
+  for (const script of ['sleep $SECONDS', 'sleep 60 | cat', 'exec -a alias sleep 60', 'sleep 60 >out']) {
+    assert.deepEqual(finalCommand(`bash -lc ${quote(script)}`), [])
+  }
+  const row = { pid: 11, startMs: 1100, name: 'sleep', cmd: 'sleep\0' + '60\0' }
+  let rows = [row], owner = null
+  const killed = [], logs = []
+  const fake = { start: () => 'start', children: () => rows, threadId: () => owner, killTree: pid => { killed.push(pid); return [pid] } }
+  const c = new CodexCommands(fake, 1, 'linux', () => 1000, { threadId: 'own', report: s => logs.push(s) })
+  c.observe('item/started', { turnId: 'turn', item: { id: 'cmd', type: 'commandExecution', command: display } })
+  assert.deepEqual(c.stop('turn'), [])
+  assert.match(logs.at(-1), /无可验证匹配/)
+  owner = 'own'; rows.push({ ...row, pid: 12 })
+  assert.deepEqual(c.stop('turn'), [])
+  assert.match(logs.at(-1), /歧义/)
+  rows.pop()
+  assert.deepEqual(c.stop('turn'), [11])
+  assert.deepEqual(killed, [11])
+})
+test('命令没有 item/completed 时由 turn/completed 清掉归属记录', () => {
+  const c = new CodexCommands({ start: () => 'root' }, 1)
+  c.observe('item/started', { turnId: 'turn', item: { id: 'cmd', type: 'commandExecution', command: "bash -lc 'sleep 60'" } })
+  assert.equal(c.items.size, 1)
+  c.observe('turn/completed', { turn: { id: 'turn', status: 'interrupted' } })
+  assert.equal(c.items.size, 0)
 })

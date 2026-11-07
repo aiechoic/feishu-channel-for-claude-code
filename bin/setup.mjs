@@ -9,7 +9,7 @@ process.argv = process.argv.filter(a => a !== '--codex')
 const cfgFile = configFile()
 const dir = dirname(cfgFile)
 if (codexMode) {
-  // Generate an isolated fragment; never overwrite a user's global Codex configuration.
+  // 生成独立片段，不覆盖用户的全局 Codex 配置。
   const toml = `[mcp_servers.feishu]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([join(HERE, 'bridge.mjs')])}\n\n[mcp_servers.feishu.env]\nFEISHU_CHANNEL_CONFIG = ${JSON.stringify(cfgFile)}\nFEISHU_CODEX_TOOLS_ONLY = "1"\n`
   writeFileSync(join(dir, 'codex.config.toml'), toml)
   console.log(`node ${JSON.stringify(join(HERE, 'codex.mjs'))} ${JSON.stringify(cfgFile)}`)

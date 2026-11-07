@@ -17,6 +17,8 @@ test('Linux：按 /proc 列子进程、算启动时刻、杀整棵树', () => {
     '/proc/stat': 'cpu 1 2 3\nbtime 1700000000\n',
     '/proc/20/cmdline': 'bash\0-c\0sleep 300',
     '/proc/30/cmdline': 'node\0/x/hook.mjs',
+    '/proc/21/cmdline': 'sleep\0' + '300\0',
+    '/proc/21/environ': 'OTHER=example\0CODEX_THREAD_ID=thread_example\0SECRET=not-returned\0',
   }
   for (const [pid, s] of Object.entries(stat)) files[`/proc/${pid}/stat`] = line(Number(pid), s)
   const killed = []
@@ -30,6 +32,9 @@ test('Linux：按 /proc 列子进程、算启动时刻、杀整棵树', () => {
   assert.deepEqual(kids.map(k => [k.pid, k.name]), [[20, 'bash'], [30, 'node']])
   assert.equal(kids[0].startMs, 1700000000_000 + 500 * 10)
   assert.match(kids[1].cmd, /hook\.mjs/)
+  assert.deepEqual(p.descendants(10).map(p => p.pid), [20, 30, 21])
+  assert.equal(p.threadId(21), 'thread_example')
+  assert.equal(p.threadId(99), null)
   assert.deepEqual(p.killTree(20), [20, 21])
   assert.deepEqual(killed, ['SIGTERM:20', 'SIGTERM:21'])
   assert.equal(p.start(20), '500')

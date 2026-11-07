@@ -81,6 +81,24 @@ function linux(o) {
   }
 
   return {
+    /** 只读取 Codex 注入的线程标识，不返回或记录其他环境变量。 */
+    threadId(pid) {
+      try { return read(`/proc/${pid}/environ`).split('\0').find(s => s.startsWith('CODEX_THREAD_ID='))?.slice('CODEX_THREAD_ID='.length) ?? null }
+      catch { return null }
+    },
+    /** 同一份进程表中遍历子树，供 shell exec 后的命令归属检查使用。 */
+    descendants(ppid) {
+      const rows = table()
+      const boot = Number(/^btime (\d+)/m.exec(read('/proc/stat'))[1]) * 1000
+      const parents = [ppid], result = []
+      for (let i = 0; i < parents.length && parents.length < 1000; i++) {
+        for (const p of rows.filter(p => p.ppid === parents[i])) {
+          parents.push(p.pid)
+          result.push({ pid: p.pid, ppid: p.ppid, name: p.name, startMs: boot + Number(p.start) * 10, cmd: cmdline(p.pid) })
+        }
+      }
+      return result
+    },
     info(pid) {
       try {
         const row = stat(pid)

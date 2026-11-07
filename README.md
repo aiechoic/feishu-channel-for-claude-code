@@ -41,11 +41,18 @@ node src/codex.mjs /path/to/config.json
 - 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`，并清理当前 turn 的命令进程树。已返回 session_id 但没有退出码的命令仍保留为目标。共享 daemon 下按本 thread 的命令事件、启动时间与完整脚本匹配；只有唯一匹配且启动身份复核一致时才杀，不按“最新 PowerShell”猜目标。独立 app-server 的子进程同样走这条检查。无法识别或匹配有歧义时只中断 turn，不猜测进程归属。
 - 停止确认接受 RPC 响应或匹配的 `turn/completed` 事件；完成事件已确认目标轮次结束时，迟到的中断 RPC 超时不会关闭接收端。Windows 实测停止后约 45 秒仍能收到新消息并自动唤醒。
 - 没有实现执行前同步拒绝每次工具调用的 Codex PreToolUse 门禁；停止期间的工具开始事件触发再次清理和中断，属于补偿措施。Windows 清理使用 taskkill /T /F；Linux 使用现有 proc.killTree。Linux 的真实 Codex 命令包装格式尚需单独验收。
+- Q497 联测：心跳只发送独立 ID 的 PostToolUse，不伪造 Pre，不删除其他待完成工具。同轮 steer 不发送会清空待完成工具的 UserPromptSubmit；turn/completed 发送 Stop，即使没有 item/completed 也清理等待状态和命令归属记录。
 - 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
 - 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
 - 白名单规则保持不变。配置 `observe` 时，白名单外消息标明仅供观察，不能当作执行授权。本部署应不设置 `observe`。
 
 接收端在前台运行，Ctrl+C 只关接收端与它的 proxy，不停止共享 Codex daemon。不要杀共享 Codex daemon来停止飞书。要关闭机器人长连接，停止该配置对应的 supervise 和 daemon 两个进程；不要影响其他配置。
+
+### Codex 已知限制
+
+- Linux 的 shell 被 exec 为末尾简单命令时，在根进程子树内同时核对启动时间、完整 argv 和进程继承的 CODEX_THREAD_ID；同参数但属于其他线程的进程不匹配。真实测试明确等待 bash 变成 sleep 后再杀目标，并保留另一线程的同参数 sleep。
+- exec 回退只支持不含变量展开、管道、重定向或其他控制运算符的末尾简单命令。缺少可读取的线程标识、复杂脚本或匹配有歧义时不猜测目标，输出明确的未清理日志，并保留原生轮次中断。
+- 本适配支持 Linux 与 Windows；macOS 没有当前实现所需的 /proc 进程归属读取，不在支持范围，真实进程清理测试在该平台明确跳过。Linux 真实进程测试通过不等于已验证真实 Linux Codex 会话的全部命令包装形式。
 
 ## 风险：先读这一段
 

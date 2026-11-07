@@ -1,4 +1,4 @@
-// A protocol peer, not a model: deterministic lifecycle events for the owned app-server adapter.
+// 模拟协议对端，提供确定的生命周期事件，不调用模型。
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 let active = null, sequence = 0
@@ -14,7 +14,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method === 'turn/start') {
     active = `turn_${++sequence}`
     result = { turn: { id: active } }
-    // Deliberately notify before response to cover ordering against daemon wake acknowledgement.
+    // 先通知再响应，覆盖与 daemon 唤醒确认之间的时序。
     notify('turn/started', { turn: { id: active } })
   }
   send({ id: m.id, result })

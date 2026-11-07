@@ -4,7 +4,7 @@ import { channelInput } from './codex-rpc.mjs'
 
 export const deliveryKey = m => createHash('sha256').update(JSON.stringify([m.meta.chat_id, m.meta.message_id, m.content])).digest('hex')
 
-/** Serial acceptance, stop barrier, and lifecycle translation, independent of the transport. */
+/** 串行确认投递、停止屏障和生命周期转换，不依赖传输方式。 */
 export class CodexSession extends EventEmitter {
   constructor(rpc, threadId, accepted = [], commands = null) {
     super()
@@ -18,6 +18,11 @@ export class CodexSession extends EventEmitter {
     rpc.on('notification', m => this.onNotification(m))
   }
   hook(event, extra = {}) { this.emit('hook', { t: 'hook', event, ...extra }) }
+  heartbeat() { this.hook('PostToolUse', { toolUseId: 'codex-heartbeat' }) }
+  /** 同轮 steer 不伪造新指令，保留 daemon 内尚未配对的工具。 */
+  deliveryHook(previousTurn) {
+    return previousTurn && previousTurn === this.turnId ? null : { t: 'hook', event: 'UserPromptSubmit' }
+  }
   onNotification({ method, params: p }) {
     if (p?.threadId !== this.threadId) return
     this.commands?.observe(method, p)
@@ -43,7 +48,7 @@ export class CodexSession extends EventEmitter {
       if (this.accepted.has(key)) return key
       if (this.stopped) throw new Error('停止中，保留消息等待本轮结束')
       const input = channelInput(m, key)
-      // Read current state instead of assuming the turn is still running after a notification.
+      // 通知之后轮次可能已结束，投递前重新读取当前状态。
       const { thread } = await this.rpc.request('thread/read', { threadId: this.threadId, includeTurns: true })
       if (thread.turns?.some(t => t.items?.some(i => i.type === 'userMessage' && i.content?.some(c => c.type === 'text' && c.text.includes(`[feishu-delivery:${key}]`))))) {
         this.accepted.add(key)
@@ -78,8 +83,8 @@ export class CodexSession extends EventEmitter {
     try {
       const killed = this.commands?.stop(target) ?? []
       if (killed.length) this.emit('killed', killed)
-      // The server may complete the turn without replying to the interrupt RPC.
-      // Its matching completion event is authoritative; a later RPC timeout must not close the bridge.
+      // 服务端可能只发轮次完成事件，没有返回中断 RPC 响应。
+      // 匹配的完成事件可以确认停止，迟到的 RPC 超时不能关闭桥接。
       await Promise.race([this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: target }), ended])
     } finally {
       this.off('turn-finished', finished)

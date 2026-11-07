@@ -16,7 +16,7 @@ const P = paths(cfg)
 mkdirSync(P.dir, { recursive: true })
 const sessionFile = join(P.dir, `${cfg.appId}-codex.json`)
 let lock
-// Same state namespace as supervise; a second Codex receiver must never take over the bridge.
+// 沿用 supervise 的状态命名空间，第二个接收端不能接管桥接。
 const lockPath = P.superSock + '-codex'
 async function claim() {
   lock = createServer(s => s.end())
@@ -60,7 +60,7 @@ const options = {
   cwd: resolve(cfg.codex?.cwd ?? process.cwd()),
   config: { mcp_servers: { feishu: { command: process.execPath, args: [join(HERE, 'bridge.mjs')], env: { FEISHU_CHANNEL_CONFIG: resolve(configFile()), FEISHU_CODEX_TOOLS_ONLY: '1' } } } },
 }
-// Keep model and approval policy inherited unless explicitly configured by the operator.
+// 模型与审批权限默认沿用会话，仅接受操作者的显式配置。
 if (cfg.codex?.model) options.model = cfg.codex.model
 const attached = cfg.codex?.threadId
 const { thread } = await rpc.request(attached || saved.threadId ? 'thread/resume' : 'thread/start', attached
@@ -73,7 +73,10 @@ if ((cfg.codex?.args ?? ['app-server', 'proxy']).includes('proxy')) {
   const root = proc.info(commandRoot)
   if (!root || !/^codex(?:\.exe)?$/i.test(root.name) || !root.cmd.includes('app-server')) throw new Error('无法验证共享 Codex daemon 的进程归属')
 }
-session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.accepted : [], new CodexCommands(proc, commandRoot))
+session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.accepted : [], new CodexCommands(proc, commandRoot, process.platform, Date.now, {
+  threadId: thread.id,
+  report: message => console.log(`Codex command cleanup: ${message}`),
+}))
 session.on('killed', ids => console.log(`Codex command cleanup: killed ${ids.join(' ')}`))
 session.turnId = thread.turns?.findLast(t => t.status === 'inProgress')?.id ?? null
 session.on('accepted', persist)
@@ -95,15 +98,17 @@ function dial() {
       const m = JSON.parse(line)
       if (m.t !== 'push') return
       accepting = true
+      const previousTurn = session.turnId
       await session.accept(m)
-      // Existing daemon expects ack followed by a wake hook. Both occur after RPC acceptance.
+      // RPC 接受投递后先确认，再仅为新轮次发送唤醒 hook。
       send({ t: 'ack', pushId: m.pushId })
-      send({ t: 'hook', event: 'UserPromptSubmit' })
+      const confirmation = session.deliveryHook(previousTurn)
+      if (confirmation) send(confirmation)
       accepting = false
       for (const hook of bufferedHooks) send(hook)
       bufferedHooks = []
     } catch (e) {
-      // Uncertain acceptance is never silently acknowledged; restart requires operator review.
+      // 投递结果不明时不确认，恢复前由操作者核对会话。
       console.error(`Codex delivery failed: ${e.message}`)
       exit(1)
     }
@@ -120,7 +125,7 @@ timer = setInterval(() => {
   } else if (!stop) lastStop = ''
   if (session.turnId && !session.stopped && Date.now() - lastHeartbeat > 10_000) {
     lastHeartbeat = Date.now()
-    send({ t: 'hook', event: 'PostToolUse', toolUseId: 'codex-heartbeat' })
+    session.heartbeat()
   }
 }, 500)
 spawn(process.execPath, [join(HERE, 'supervise.mjs')], { env: { ...process.env, FEISHU_CHANNEL_CONFIG: resolve(configFile()) }, detached: true, stdio: 'ignore', windowsHide: true }).unref()
