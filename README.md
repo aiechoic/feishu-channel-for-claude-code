@@ -39,6 +39,7 @@ node src/codex.mjs /path/to/config.json
 - 忙闲和工具名来自 app-server 的 turn/item 事件，不安装 Claude Code hooks，也不把其 hook 输出格式当作 Codex 契约。接收端每 10 秒上报存活心跳。
 - 忙时的 RPC 成功代表服务端接受补充，不代表模型此刻已经读到；具体应用时机由 Codex 的安全边界决定。
 - 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`，并清理当前 turn 的命令进程树。已返回 session_id 但没有退出码的命令仍保留为目标。共享 daemon 下按本 thread 的命令事件、启动时间与完整脚本匹配；只有唯一匹配且启动身份复核一致时才杀，不按“最新 PowerShell”猜目标。独立 app-server 的子进程同样走这条检查。无法识别或匹配有歧义时只中断 turn，不猜测进程归属。
+- 停止确认接受 RPC 响应或匹配的 `turn/completed` 事件；完成事件已确认目标轮次结束时，迟到的中断 RPC 超时不会关闭接收端。Windows 实测停止后约 45 秒仍能收到新消息并自动唤醒。
 - 没有实现执行前同步拒绝每次工具调用的 Codex PreToolUse 门禁；停止期间的工具开始事件触发再次清理和中断，属于补偿措施。Windows 清理使用 taskkill /T /F；Linux 使用现有 proc.killTree。Linux 的真实 Codex 命令包装格式尚需单独验收。
 - 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
 - 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
