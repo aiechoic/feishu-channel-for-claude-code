@@ -40,6 +40,7 @@ export function paths(cfg, platform = process.platform) {
     pipe: platform === 'win32',
     seen: `${base}-seen.txt`,
     dms: `${base}-dm-chats.txt`,
+    /** 补过的会话（群和私信）；不在里面的是新会话，只补最近 24 小时 */
     known: `${base}-groups.txt`,
     log: `${base}.log`,
     state: `${base}-state.json`,

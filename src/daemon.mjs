@@ -603,14 +603,18 @@ const missing = new Map()
 const MISSING_TRIES = 5
 
 async function catchUpChat(chat, isGroup, loud) {
-  const fresh = isGroup && !known.has(chat) && !firstRun // 新进的群只要最近 24 小时
+  const fresh = !known.has(chat) && !firstRun // 第一次见到的会话（新进的群、新来的私信）只要最近 24 小时
   const begin = Date.now()
   if (loud) log(`拉取开始 ${chat}`)
   const rows = await unread(chat)
   if (loud || rows.length) log(`拉取结束 ${chat}：${Date.now() - begin}ms，新消息 ${rows.length} 条 ${rows.map(m => m.message_id).join(' ')}`)
   const old = rows.filter(m => firstRun || (fresh && (m.create_time ?? '') < dayAgo()))
-  if (old.length) log(`跳过 ${chat} 的 ${old.length} 条旧消息（${firstRun ? '首次运行，现有消息记为已读' : '新进的群，只收最近 24 小时'}）：${old.map(m => m.message_id).join(' ')}`)
+  if (old.length) log(`跳过 ${chat} 的 ${old.length} 条旧消息（${firstRun ? '首次运行，现有消息记为已读' : `新${isGroup ? '进的群' : '私信会话'}，只收最近 24 小时`}）：${old.map(m => m.message_id).join(' ')}`)
   for (const m of rows) admit(m, chat, isGroup, old.includes(m))
+  if (!known.has(chat)) { // 补过一次就不再是新会话，重启后照常补漏
+    known.add(chat)
+    writeFileSync(P.known, [...known].sort().join('\n'))
+  }
   let again = 0
   for (const [id, w] of missing) {
     if (w.chat !== chat) continue
@@ -717,10 +721,6 @@ async function catchUp(only) {
   if (!only && firstRun) {
     firstRun = false
     log('首次运行：现有消息已记为已读，之后的消息照常送')
-  }
-  if (gs.length) {
-    gs.forEach(g => known.add(g))
-    writeFileSync(P.known, [...known].sort().join('\n'))
   }
 }
 
