@@ -26,6 +26,7 @@ export class CodexSession extends EventEmitter {
       if (this.stopped) { this.interrupt().catch(e => this.emit('failure', e)); return }
       this.hook('UserPromptSubmit')
     } else if (method === 'turn/completed') {
+      this.emit('turn-finished', p.turn)
       this.turnId = null
       this.stopped = false
       this.hook('Stop')
@@ -67,8 +68,21 @@ export class CodexSession extends EventEmitter {
   }
   async interrupt() {
     this.stopped = true
-    const killed = this.commands?.stop(this.turnId) ?? []
-    if (killed.length) this.emit('killed', killed)
-    if (this.turnId) await this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId })
+    const target = this.turnId
+    if (!target) return
+    let finished
+    const ended = new Promise(resolve => {
+      finished = turn => { if (turn.id === target) resolve() }
+      this.on('turn-finished', finished)
+    })
+    try {
+      const killed = this.commands?.stop(target) ?? []
+      if (killed.length) this.emit('killed', killed)
+      // The server may complete the turn without replying to the interrupt RPC.
+      // Its matching completion event is authoritative; a later RPC timeout must not close the bridge.
+      await Promise.race([this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: target }), ended])
+    } finally {
+      this.off('turn-finished', finished)
+    }
   }
 }

@@ -77,3 +77,16 @@ test('history marker recovers accepted delivery after local acknowledgement file
   await s.accept(m)
   assert.ok(s.accepted.has(key))
 })
+test('matching completion confirms stop even when interrupt RPC later times out', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  s.turnId = 'turn1'
+  let rejectRpc
+  rpc.request = () => new Promise((resolve, reject) => { rejectRpc = reject })
+  const stopped = s.interrupt()
+  rpc.emit('notification', { method: 'turn/completed', params: { threadId: 'thread1', turn: { id: 'turn1', status: 'interrupted' } } })
+  await stopped
+  rejectRpc(new Error('RPC timeout'))
+  await Promise.resolve()
+  assert.equal(s.turnId, null)
+  assert.equal(s.listenerCount('turn-finished'), 0)
+})
