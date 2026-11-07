@@ -439,6 +439,44 @@ test('常驻进程被杀后重启：队列不丢、不重复', async () => {
   } finally { r.close() }
 })
 
+/** create_time 的写法（本机时区 YYYY-MM-DD HH:MM），按距现在多少小时 */
+const hoursAgo = h => {
+  const d = new Date(Date.now() - h * 3_600_000)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+test('新来的私信会话只补最近 24 小时：更早的记已读不送，触发发现的新消息照送；补过后记进 known，重启后照常补漏', async () => {
+  const r = new Rig({ observe: { dms: true } })
+  const dm = (id, h, sender = 'ou_t9') => ({ ...msg(id, sender), chat_id: 'oc_dm9', create_time: hoursAgo(h) })
+  try {
+    await r.startDaemon()
+    await r.bridge()
+    r.messages.push(dm('om_d1', 24 * 30), dm('om_d2', 48, 'ou_ok'), dm('om_d3', 25), dm('om_recent', 2), dm('om_new', 0))
+    r.write()
+    writeFileSync(join(r.dir, 'event'), JSON.stringify({ chat: 'oc_dm9', chatType: 'p2p', message: { ...r.messages.at(-1), sender: { id: 'ou_t9', sender_type: 'user' } } }))
+    await until(() => r.log().includes('跳过 oc_dm9 的 3 条旧消息（新私信会话，只收最近 24 小时）'), '跳过旧消息')
+    await until(() => r.pushes.length >= 1, '新消息送出')
+    assert.equal(r.pushes[0].meta.message_id, 'om_new', '触发发现的新消息先送')
+    await until(() => r.log().includes('入队（外部发送者） om_recent'), '24 小时内的照收')
+    await sleep(300)
+    const queued = [...r.log().matchAll(/入队(?:（外部发送者）)? (om_\w+)/g)].map(m => m[1]).sort()
+    assert.deepEqual(queued, ['om_new', 'om_recent'], '更早的不入队')
+    assert.match(r.file('cli_me-groups.txt'), /oc_dm9/, '私信会话记进 known')
+    for (const id of ['om_d1', 'om_d2', 'om_d3']) assert.match(r.file('cli_me-seen.txt'), new RegExp(id), `${id} 记已读`)
+
+    r.daemon.kill('SIGKILL')
+    r.link.destroy()
+    r.messages.push(dm('om_offline', 30, 'ou_ok')) // 离线期间补进来的、时间早于 24 小时的消息：已不是新会话，照常补
+    r.write()
+    rmSync(join(r.dir, 'consume.log'))
+    await r.startDaemon()
+    await r.bridge(888888)
+    await until(() => r.log().includes('入队 om_offline'), '重启后补漏照收')
+    assert.doesNotMatch(r.log().split('常驻进程启动').at(-1), /跳过 oc_dm9/, '重启后不再当新会话')
+  } finally { r.close() }
+})
+
 test('状态卡片只发一次、置顶一次，状态变了才更新', () => rig(async r => {
   await until(() => r.file('card.txt').includes('pin'), '置顶')
   r.hook('UserPromptSubmit')
