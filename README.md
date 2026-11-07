@@ -253,6 +253,8 @@ npm test
 
 用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。GitHub Actions 在 ubuntu 和 windows 上各跑一遍。「停」杀真实 bash 子进程那条只在 Linux / macOS 跑；Windows 的查表和杀树由 `test/proc.test.mjs` 用模拟的 PowerShell 输出覆盖。
 
+Codex 集成测试直接持有真实 daemon，用子进程专用的 `test/owned-daemon.mjs` 预载接管 receiver 和 MCP bridge 的 supervise 自动启动，不起 detached supervise。测试记录各子进程 PID，关闭后断言全部退出再删临时目录；此预载不用于实际接收端。
+
 测过的 Claude Code 版本：2.1.316（真实飞书 + 真实会话）。
 
 真实环境（Linux）验证过：闲时唤醒、忙时送达、忙时合并、停、撤回事件、定时（一次性、等进程、暂停后补发、离线补发）、常驻进程被杀后恢复。没有验证过：真实断网下的长连接重连（由官方 SDK 负责）、`daily` 和 `weekly` 到点触发（只有单测）、Windows 上的真实会话。
