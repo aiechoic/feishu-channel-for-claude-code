@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import { CodexSession } from '../src/codex-session.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
@@ -16,6 +18,26 @@ import { paths } from '../src/common.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
 const IS_WIN = process.platform === 'win32'
+
+test('Codex 心跳和同轮补充保留 Q497 的待完成工具，中断缺 item/completed 时 Stop 清理', () => rig(async r => {
+  const rpc = new EventEmitter()
+  const session = new CodexSession(rpc, 'thread_example')
+  session.on('hook', h => r.hook(h.event, { tool_name: h.tool, tool_use_id: h.toolUseId }))
+  rpc.emit('notification', { method: 'turn/started', params: { threadId: 'thread_example', turn: { id: 'turn_example' } } })
+  rpc.emit('notification', { method: 'item/started', params: { threadId: 'thread_example', turnId: 'turn_example', item: { id: 'waiting_choice', type: 'mcpToolCall' } } })
+  session.heartbeat()
+  assert.equal(session.deliveryHook('turn_example'), null, '同轮 steer 不发清空待完成工具的 UserPromptSubmit')
+  const state = () => JSON.parse(r.file('cli_me-state.json'))
+  await until(() => state().inflight.waiting_choice, 'Codex 工具记录已保存')
+  assert.equal(state().inflight['codex-heartbeat'], undefined, '心跳不产生虚构的待完成工具')
+  await until(() => r.log().includes('工具 mcpToolCall 还没结束'), '心跳过期后仍受 Q497 待完成工具保护')
+  assert.equal(state().busy, true)
+  assert.ok(state().inflight.waiting_choice, '无配对的 Post 心跳不删除其他工具')
+  rpc.emit('notification', { method: 'turn/completed', params: { threadId: 'thread_example', turn: { id: 'turn_example', status: 'interrupted' } } })
+  await until(() => !state().busy, '中断发出 Stop 后标闲')
+  assert.deepEqual(state().inflight, {}, '没有 item/completed 也不会留下待完成工具')
+  assert.equal(session.turnId, null)
+}, { busyTimeoutSec: 0.1, toolWaitMaxSec: 30 }))
 
 const msg = (id, sender = 'ou_ok', extra = {}) => ({
   chat_id: 'oc_group', message_id: id, content: `正文 ${id}`, msg_type: 'text', create_time: '2026-11-01 10:00',
@@ -533,7 +555,8 @@ test('唤醒重发停发后闲时收到 hook（Stop）也恢复，按闲时送�
   r.hook('Stop')
   await until(() => r.pushes.length === 3, '恢复后闲时送出')
   assert.equal(r.pushes[2].meta.retry, undefined, '恢复后重新计数')
-  r.hook('UserPromptSubmit')
+  // 这条验证 daemon 的确认协议，直接走已有桥；不把 Node 启动耗时塞进 100ms 的唤醒窗口。
+  r.link.write(`${JSON.stringify({ t: 'hook', event: 'UserPromptSubmit' })}\n`)
   await until(() => r.log().split('已唤醒').length === 2, '唤醒')
 }, { wakeTimeoutSec: 0.1, wakeRetryMax: 2 }))
 

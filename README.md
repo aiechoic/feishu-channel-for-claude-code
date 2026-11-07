@@ -4,6 +4,56 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 把飞书的群和私信送进运行中的 Claude Code 会话：有消息才唤醒，忙时补充立刻送进这一轮，能远程喊停，飞书里看得到状态，还能定时唤醒。
 
+## Codex
+
+需要 Codex CLI 的 app-server 接口。Windows 本机验证使用 CLI 0.166.0、共享 daemon 0.167.0；真实飞书忙时送达、MCP 回复、闲时唤醒、两分钟一次性定时，以及「停」中断当前轮次并杀掉等待命令均通过。同父进程下另一条 PowerShell 保持存活的真实进程用例也通过。模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。
+
+安装依赖仍用 `npm ci --ignore-scripts`。配置沿用同一份 JSON，secret 放 `appSecretFile`，只放行用户和主程。不要与另一个使用同一机器人的常驻进程同时运行。
+
+在配置中添加 `codex`：
+
+```json
+{
+  "codex": {
+    "threadId": "目标会话的 UUID",
+    "cwd": "本机工作目录"
+  }
+}
+```
+
+`threadId` 指向当前窗口时，先在该窗口确认会话 UUID，再启动。没有 `threadId` 时创建专用会话，并把 UUID 保存在 `<stateDir>/<appId>-codex.json`；再次启动恢复它。新窗口要改 `threadId` 后重启接收端。不要将同一 UUID 同时交给独立 app-server 和共享 daemon 驱动。
+
+```bash
+node bin/setup.mjs --codex /path/to/config.json
+node src/codex.mjs /path/to/config.json
+```
+
+`setup --codex` 生成独立 `codex.config.toml` 片段，不覆盖用户全局配置。连接已有窗口前，把片段中的 `mcp_servers.feishu` 合入该工作区受信任的 `.codex/config.toml`，在 Codex 中重新加载 MCP（或重开窗口）。片段中的 MCP 只提供 `reply`、`schedule_*`，不会冒充消息接收端。新建专用会话时接收端自动传入这份 MCP 配置。模型和权限沿用目标会话；新建会话可显式配 `codex.model`，不自动放宽权限。
+
+默认启动 `codex app-server proxy` 连接本机共享 daemon。proxy 是字节通道：先做 WebSocket HTTP Upgrade，再发 WebSocket JSON-RPC，不能直接写 JSONL。`turn/start` 用于闲时唤醒，`turn/steer` 带当前 turn ID 用于忙时补充，`turn/interrupt` 用于停和处理中撤回。回到 daemon 的 ack 在 RPC 成功响应后发出，不把 CLI 退出码当成唤醒证明。源消息 ID、合并数、发送者和外部信任标记保留在输入中。
+
+需要独立进程时显式设置 `codex.args` 为 `["app-server", "--listen", "stdio://"]`，并去掉指向现有窗口的 `threadId`。`codex.command` 可以指定实际的 Codex 可执行文件路径。
+
+与 Claude Code 的差别和边界：
+
+- 忙闲和工具名来自 app-server 的 turn/item 事件，不安装 Claude Code hooks，也不把其 hook 输出格式当作 Codex 契约。接收端每 10 秒上报存活心跳。
+- 忙时的 RPC 成功代表服务端接受补充，不代表模型此刻已经读到；具体应用时机由 Codex 的安全边界决定。
+- 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`，并清理当前 turn 的命令进程树。已返回 session_id 但没有退出码的命令仍保留为目标。共享 daemon 下按本 thread 的命令事件、启动时间与完整脚本匹配；只有唯一匹配且启动身份复核一致时才杀，不按“最新 PowerShell”猜目标。独立 app-server 的子进程同样走这条检查。无法识别或匹配有歧义时只中断 turn，不猜测进程归属。
+- 停止确认接受 RPC 响应或匹配的 `turn/completed` 事件；完成事件已确认目标轮次结束时，迟到的中断 RPC 超时不会关闭接收端。Windows 实测停止后约 45 秒仍能收到新消息并自动唤醒。
+- 没有实现执行前同步拒绝每次工具调用的 Codex PreToolUse 门禁；停止期间的工具开始事件触发再次清理和中断，属于补偿措施。Windows 清理使用 taskkill /T /F；Linux 使用现有 proc.killTree。Linux 的真实 Codex 命令包装格式尚需单独验收。
+- Q497 联测：心跳只发送独立 ID 的 PostToolUse，不伪造 Pre，不删除其他待完成工具。同轮 steer 不发送会清空待完成工具的 UserPromptSubmit；turn/completed 发送 Stop，即使没有 item/completed 也清理等待状态和命令归属记录。
+- 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
+- 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
+- 白名单规则保持不变。配置 `observe` 时，白名单外消息标明仅供观察，不能当作执行授权。本部署应不设置 `observe`。
+
+接收端在前台运行，Ctrl+C 只关接收端与它的 proxy，不停止共享 Codex daemon。不要杀共享 Codex daemon来停止飞书。要关闭机器人长连接，停止该配置对应的 supervise 和 daemon 两个进程；不要影响其他配置。
+
+### Codex 已知限制
+
+- Linux 的 shell 被 exec 为末尾简单命令时，在根进程子树内同时核对启动时间、完整 argv 和进程继承的 CODEX_THREAD_ID；同参数但属于其他线程的进程不匹配。真实测试明确等待 bash 变成 sleep 后再杀目标，并保留另一线程的同参数 sleep。
+- exec 回退只支持不含变量展开、管道、重定向或其他控制运算符的末尾简单命令。缺少可读取的线程标识、复杂脚本或匹配有歧义时不猜测目标，输出明确的未清理日志，并保留原生轮次中断。
+- 本适配支持 Linux 与 Windows；macOS 没有当前实现所需的 /proc 进程归属读取，不在支持范围，真实进程清理测试在该平台明确跳过。Linux 真实进程测试通过不等于已验证真实 Linux Codex 会话的全部命令包装形式。
+
 ## 风险：先读这一段
 
 - 依赖 Claude Code 的研究预览功能 Channels，协议和参数都可能变动。
