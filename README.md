@@ -6,7 +6,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 ## Codex
 
-需要 Codex CLI 的 app-server 接口。Windows 本机协议验证使用 CLI 0.166.0、共享 daemon 0.167.0；真实飞书忙时送达、MCP 回复、闲时唤醒与两分钟一次性定时通过。模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。
+需要 Codex CLI 的 app-server 接口。Windows 本机验证使用 CLI 0.166.0、共享 daemon 0.167.0；真实飞书忙时送达、MCP 回复、闲时唤醒、两分钟一次性定时，以及「停」中断当前轮次并杀掉等待命令均通过。同父进程下另一条 PowerShell 保持存活的真实进程用例也通过。模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。
 
 安装依赖仍用 `npm ci --ignore-scripts`。配置沿用同一份 JSON，secret 放 `appSecretFile`，只放行用户和主程。不要与另一个使用同一机器人的常驻进程同时运行。
 
