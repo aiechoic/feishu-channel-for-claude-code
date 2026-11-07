@@ -6,7 +6,7 @@ export const deliveryKey = m => createHash('sha256').update(JSON.stringify([m.me
 
 /** Serial acceptance, stop barrier, and lifecycle translation, independent of the transport. */
 export class CodexSession extends EventEmitter {
-  constructor(rpc, threadId, accepted = []) {
+  constructor(rpc, threadId, accepted = [], commands = null) {
     super()
     this.rpc = rpc
     this.threadId = threadId
@@ -14,11 +14,13 @@ export class CodexSession extends EventEmitter {
     this.turnId = null
     this.stopped = false
     this.serial = Promise.resolve()
+    this.commands = commands
     rpc.on('notification', m => this.onNotification(m))
   }
   hook(event, extra = {}) { this.emit('hook', { t: 'hook', event, ...extra }) }
   onNotification({ method, params: p }) {
     if (p?.threadId !== this.threadId) return
+    this.commands?.observe(method, p)
     if (method === 'turn/started') {
       this.turnId = p.turn.id
       if (this.stopped) { this.interrupt().catch(e => this.emit('failure', e)); return }
@@ -65,6 +67,8 @@ export class CodexSession extends EventEmitter {
   }
   async interrupt() {
     this.stopped = true
+    const killed = this.commands?.stop(this.turnId) ?? []
+    if (killed.length) this.emit('killed', killed)
     if (this.turnId) await this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId })
   }
 }

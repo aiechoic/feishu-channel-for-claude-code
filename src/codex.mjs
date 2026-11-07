@@ -3,10 +3,13 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { createInterface } from 'node:readline'
 import { configFile, HERE, paths, readConfig } from './common.mjs'
 import { CodexRpc } from './codex-rpc.mjs'
 import { CodexSession } from './codex-session.mjs'
+import { CodexCommands } from './codex-proc.mjs'
+import proc from './proc.mjs'
 
 const cfg = readConfig()
 const P = paths(cfg)
@@ -63,7 +66,15 @@ const attached = cfg.codex?.threadId
 const { thread } = await rpc.request(attached || saved.threadId ? 'thread/resume' : 'thread/start', attached
   ? { threadId: attached, excludeTurns: false }
   : { ...options, ...(saved.threadId ? { threadId: saved.threadId } : {}) })
-session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.accepted : [])
+let commandRoot = rpc.child.pid
+if ((cfg.codex?.args ?? ['app-server', 'proxy']).includes('proxy')) {
+  const daemonFile = join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'app-server-daemon', 'daemon.pid')
+  commandRoot = JSON.parse(readFileSync(daemonFile, 'utf8')).pid
+  const root = proc.info(commandRoot)
+  if (!root || !/^codex(?:\.exe)?$/i.test(root.name) || !root.cmd.includes('app-server')) throw new Error('无法验证共享 Codex daemon 的进程归属')
+}
+session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.accepted : [], new CodexCommands(proc, commandRoot))
+session.on('killed', ids => console.log(`Codex command cleanup: killed ${ids.join(' ')}`))
 session.turnId = thread.turns?.findLast(t => t.status === 'inProgress')?.id ?? null
 session.on('accepted', persist)
 session.on('failure', e => { console.error(e.message); exit(1) })

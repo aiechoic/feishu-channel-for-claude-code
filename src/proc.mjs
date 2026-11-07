@@ -81,6 +81,12 @@ function linux(o) {
   }
 
   return {
+    info(pid) {
+      try {
+        const row = stat(pid)
+        return { ...row, cmd: cmdline(pid) }
+      } catch { return null }
+    },
     /** ppid 的子进程：{ pid, name, startMs, cmd } */
     children(ppid) {
       const boot = Number(/^btime (\d+)/m.exec(read('/proc/stat'))[1]) * 1000
@@ -158,6 +164,7 @@ function windows(exec) {
   }
 
   return {
+    info(pid) { return query(`ProcessId=${Number(pid)}`)[0] ?? null },
     children(ppid) {
       return query(`ParentProcessId=${Number(ppid)}`).map(({ pid, name, startMs, cmd }) => ({ pid, name, startMs, cmd }))
     },

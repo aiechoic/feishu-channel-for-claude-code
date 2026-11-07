@@ -6,7 +6,7 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 ## Codex
 
-需要 Codex CLI 的 app-server 接口。Windows 本机协议验证使用 CLI 0.166.0、共享 daemon 0.167.0；模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。真实飞书到真实 Codex 的完整验收仍需机器人凭据与人工发送测试消息。
+需要 Codex CLI 的 app-server 接口。Windows 本机协议验证使用 CLI 0.166.0、共享 daemon 0.167.0；真实飞书忙时送达、MCP 回复、闲时唤醒与两分钟一次性定时通过。模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。
 
 安装依赖仍用 `npm ci --ignore-scripts`。配置沿用同一份 JSON，secret 放 `appSecretFile`，只放行用户和主程。不要与另一个使用同一机器人的常驻进程同时运行。
 
@@ -38,7 +38,8 @@ node src/codex.mjs /path/to/config.json
 
 - 忙闲和工具名来自 app-server 的 turn/item 事件，不安装 Claude Code hooks，也不把其 hook 输出格式当作 Codex 契约。接收端每 10 秒上报存活心跳。
 - 忙时的 RPC 成功代表服务端接受补充，不代表模型此刻已经读到；具体应用时机由 Codex 的安全边界决定。
-- 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`。没有实现可在执行之前同步拒绝每次工具调用的 Codex PreToolUse 门禁；收到已开始工具事件后重发中断属于补偿措施。真实长命令及后续工具被取消的行为必须在目标 Codex 版本验收，不能用模拟测试替代。
+- 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`，并清理当前 turn 的命令进程树。已返回 session_id 但没有退出码的命令仍保留为目标。共享 daemon 下按本 thread 的命令事件、启动时间与完整脚本匹配；只有唯一匹配且启动身份复核一致时才杀，不按“最新 PowerShell”猜目标。独立 app-server 的子进程同样走这条检查。无法识别或匹配有歧义时只中断 turn，不猜测进程归属。
+- 没有实现执行前同步拒绝每次工具调用的 Codex PreToolUse 门禁；停止期间的工具开始事件触发再次清理和中断，属于补偿措施。Windows 清理使用 taskkill /T /F；Linux 使用现有 proc.killTree。Linux 的真实 Codex 命令包装格式尚需单独验收。
 - 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
 - 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
 - 白名单规则保持不变。配置 `observe` 时，白名单外消息标明仅供观察，不能当作执行授权。本部署应不设置 `observe`。
