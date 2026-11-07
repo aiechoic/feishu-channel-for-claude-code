@@ -4,11 +4,12 @@ import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 const dir = process.env.FAKE
 const all = () => JSON.parse(readFileSync(`${dir}/messages.json`, 'utf8'))
 
-const brief = content => `${content.match(/忙|闲|离线/)?.[0] ?? ''} ${content.match(/下一个定时[^"\\]*/)?.[0] ?? ''} ${content.match(/会话一直没唤醒[^"\\]*/)?.[0] ?? ''}`
+const brief = content => `${content.match(/忙|闲|离线/)?.[0] ?? ''} ${content.match(/下一个定时[^"\\]*/)?.[0] ?? ''} ${content.match(/会话一直没唤醒[^"\\]*/)?.[0] ?? ''} ${content.match(/未读\*\*：[^"\\]*/)?.[0] ?? ''}`
 
 export function connect() {
   return {
     listChats: async () => ['oc_group'],
+    chatName: async chat => (chat === 'oc_group' ? '测试群' : ''),
     async grantedScopes() {
       if (existsSync(`${dir}/scopes-fail`)) throw new Error('无权查询')
       return existsSync(`${dir}/scopes.json`) ? JSON.parse(readFileSync(`${dir}/scopes.json`, 'utf8')) : ['im:message', 'im:chat', 'im:message.group_msg', 'im:message.p2p_msg:readonly']

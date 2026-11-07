@@ -88,6 +88,11 @@ export function connect(cfg, log) {
       for await (const page of await client.im.chat.listWithIterator({ params: { page_size: 100 } })) out.push(...(page?.items ?? []))
       return out.map(c => c.chat_id)
     },
+    /** 群名；私信会话没有名字时返回空 */
+    async chatName(chat) {
+      const data = ok(await client.im.chat.get({ path: { chat_id: chat } }))
+      return data?.name ?? ''
+    },
     async listMessages(chat, pageToken) {
       const data = ok(await client.im.message.list({
         params: { container_id_type: 'chat', container_id: chat, sort_type: 'ByCreateTimeDesc', page_size: 50, with_sender_name: true, ...(pageToken ? { page_token: pageToken } : {}) },
