@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 const dir = process.env.FAKE
 const all = () => JSON.parse(readFileSync(`${dir}/messages.json`, 'utf8'))
 
-const brief = content => `${content.match(/忙|闲|离线/)?.[0] ?? ''} ${content.match(/下一个定时[^"\\]*/)?.[0] ?? ''}`
+const brief = content => `${content.match(/忙|闲|离线/)?.[0] ?? ''} ${content.match(/下一个定时[^"\\]*/)?.[0] ?? ''} ${content.match(/会话一直没唤醒[^"\\]*/)?.[0] ?? ''}`
 
 export function connect() {
   return {
