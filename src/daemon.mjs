@@ -31,6 +31,7 @@ import { paths, readConfig } from './common.mjs'
 import { checkScopes } from './doctor.mjs'
 import proc, { COMMAND_TOOLS, isCommandShell } from './proc.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
+import { callTool, TOOLS } from './tools.mjs'
 
 const cfg = readConfig()
 const P = paths(cfg)
@@ -930,29 +931,19 @@ function onLine(sock, line) {
       wakeTries = 0
       setIdle('新会话', false)
     }
-  } else if (m.t === 'unread') {
-    let r
-    try {
-      r = { ok: true, text: readUnread(m.args ?? {}) }
-    } catch (e) {
-      r = { ok: false, text: e.message }
-    }
-    sock.write(`${JSON.stringify({ t: 'reply-result', id: m.id, ...r })}\n`)
-  } else if (m.t === 'schedule') {
-    let r
-    try {
-      r = { ok: true, text: onSchedule(m) }
-    } catch (e) {
-      r = { ok: false, text: e.message }
-    }
-    sock.write(`${JSON.stringify({ t: 'reply-result', id: m.id, ...r })}\n`)
-  } else if (m.t === 'reply') {
-    send(m.chat_id, m.text).then(
-      id => sock.write(`${JSON.stringify({ t: 'reply-result', id: m.id, ok: true, text: `已发送 ${id}` })}\n`),
-      e => sock.write(`${JSON.stringify({ t: 'reply-result', id: m.id, ok: false, text: `发送失败：${e.message}` })}\n`),
-    )
+  } else if (m.t === 'tools') { // 桥连上后取工具列表，常驻进程换版后桥据此通知客户端
+    write(sock, { t: 'tools-result', id: m.id, tools: TOOLS })
+  } else if (m.t === 'call') {
+    callTool(TOOL_OPS, m.name, m.args ?? {}).then(result => write(sock, { t: 'call-result', id: m.id, result }))
+  } else if (m.t === 'reply' || m.t === 'schedule' || m.t === 'unread') { // 旧版桥：工具写死在桥里，按旧消息格式答
+    const name = m.t === 'reply' ? 'reply' : m.t === 'unread' ? 'read_unread' : `schedule_${m.action}`
+    const args = m.t === 'reply' ? { chat_id: m.chat_id, text: m.text } : m.args ?? {}
+    callTool(TOOL_OPS, name, args).then(r => write(sock, { t: 'reply-result', id: m.id, ok: !r.isError, text: r.content[0].text }))
   }
 }
+
+const TOOL_OPS = { send, readUnread, schedule: (action, args) => onSchedule({ action, args }) }
+const write = (sock, m) => sock.write(`${JSON.stringify(m)}\n`)
 
 let stopping = false
 if (!P.pipe) rmSync(P.sock, { force: true }) // Unix socket 文件会残留；Windows 命名管道随进程消失
