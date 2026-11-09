@@ -83,9 +83,13 @@ test('常驻进程换版：桥重连后发 list_changed，重新 tools/list 看�
   const v2 = mkdtempSync(join(ROOT, 'test', '.v2-'))
   try {
     cpSync(join(ROOT, 'src'), v2, { recursive: true })
-    writeFileSync(join(v2, 'tools.mjs'), readFileSync(join(v2, 'tools.mjs'), 'utf8')
-      .replace("}]\n\nconst text", "}, {\n  name: 'ping',\n  description: '新版才有',\n  inputSchema: { type: 'object', properties: {} },\n}]\n\nconst text")
-      .replace("    return text(`未知工具", "    if (name === 'ping') return text('pong')\n    return text(`未知工具"))
+    // Windows 上 git 默认按 CRLF 检出，按行匹配要容得下 \r；没改上就直接报错，别让「新版」和旧版一样
+    const src = readFileSync(join(v2, 'tools.mjs'), 'utf8')
+    const patched = src
+      .replace(/\}\](\r?\n)+const text/, "}, { name: 'ping', description: '新版才有', inputSchema: { type: 'object', properties: {} } }]\nconst text")
+      .replace(/^( *)return text\(`未知工具/m, "$1if (name === 'ping') return text('pong')\n$1return text(`未知工具")
+    assert.equal(patched.split("'ping'").length, 3, '新版副本的 tools.mjs 没改上')
+    writeFileSync(join(v2, 'tools.mjs'), patched)
     await r.startDaemon()
     const claude = await r.client()
     const codex = await r.client(undefined, { FEISHU_CODEX_TOOLS_ONLY: '1' })
