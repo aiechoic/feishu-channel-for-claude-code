@@ -67,6 +67,7 @@ node src/codex.mjs /path/to/config.json
 | `src/daemon.mjs` | 常驻进程：长连接、已读记录、队列、忙闲、停、撤回、定时、表情、状态卡片 |
 | `src/supervise.mjs` | 外层循环：常驻进程退出后拉起；占住一个本机端点保证同一状态目录只跑一份 |
 | `src/bridge.mjs` | MCP 桥（stdio）：只转发，启动时确保外层循环在跑 |
+| `src/tools.mjs` | MCP 工具的定义和执行，由常驻进程加载；桥连上常驻进程后从它取列表 |
 | `src/hook.mjs` | Claude Code hook：上报忙闲和工具名，看到停止标记时结束这一轮 |
 | `src/feishu.mjs` | 飞书适配器，基于官方 Node SDK |
 | `bin/restart.mjs` | 重启常驻进程：凭 pid 文件认准再杀，等外层循环拉起新的 |
@@ -226,6 +227,21 @@ node bin/restart.mjs            # 配置文件取法同其他入口：环境变�
 
 自动模式下，在 `.claude/settings.json` 的 `permissions.allow` 里加 `"Bash(node <仓库路径>/bin/restart.mjs*)"`，会话就能自己重启，不用请人手动杀进程。
 
+### 工具随常驻进程热更新
+
+工具（`reply`、`read_unread`、`schedule_*`）的名字、说明、参数 schema 和执行都在常驻进程（`src/tools.mjs`），桥只转发 `tools/list` 和 `tools/call`。桥在 initialize 时声明 `tools.listChanged`，每次连上常驻进程都重新取一次工具列表，和上次给客户端的不一样就发 `notifications/tools/list_changed`。所以加工具、改工具后只要 `restart.mjs` 重启常驻进程：
+
+| 客户端 | 已开的会话 | 新会话 / 新线程 |
+| --- | --- | --- |
+| Claude Code（测过 2.1.319） | 收到通知后马上重新 `tools/list`，新增、删掉的工具都跟着变，模型下一轮就能看到 | 新的 |
+| Codex app-server（测过 codex-cli 0.167.0） | **不跟着变**：不理 `tools/list_changed`；`config/mcpServer/reload`、`thread/unsubscribe` 后再 `thread/resume`、MCP 进程退出都不会让已加载的线程重新取列表 | 新开的线程（`thread/start`）重新拉起桥，拿到新列表 |
+
+不管哪种客户端，已有工具的执行逻辑、参数校验和返回内容都在常驻进程，重启后马上生效；Codex 已开的线程只是看不到新增的工具、改过的说明和 schema，调删掉的工具会收到「未知工具」。
+
+服务说明（桥在 initialize 时给的 instructions）只在 initialize 时发一次，MCP 没有更新它的通知：改了说明，已开的会话要 `/mcp` 重连（Codex 要新开线程）才看得到。
+
+桥本身的代码只在会话开的时候加载。桥和常驻进程新旧混用时：新桥连旧常驻进程（不认识取列表的消息，3 秒等不到回应），按旧消息格式提供原来那 5 个工具；旧桥（工具写死在桥里）连新常驻进程，原来那 5 个工具照常能用，但拿不到新工具，要重连一次换成新桥。
+
 ## 排查
 
 收消息慢时先看日志（`<stateDir>/<appId>.log`，时间是 UTC，带毫秒）。一条消息依次有：`事件到达`（创建→到达、事件时间→到达）、走 get 时的 `get 确认`、补漏时的 `拉取开始` / `拉取结束`、`入队`（创建→入队）、`已送出`（创建→送出）、`已唤醒`。
@@ -257,6 +273,6 @@ npm test
 
 Codex 集成测试直接持有真实 daemon，用子进程专用的 `test/owned-daemon.mjs` 预载接管 receiver 和 MCP bridge 的 supervise 自动启动，不起 detached supervise。测试记录各子进程 PID，关闭后断言全部退出再删临时目录；此预载不用于实际接收端。
 
-测过的 Claude Code 版本：2.1.316（真实飞书 + 真实会话）。
+测过的 Claude Code 版本：2.1.316（真实飞书 + 真实会话）。工具热更新（`test/bridge.test.mjs` 之外）用 Claude Code 2.1.319 和 codex-cli 0.167.0 的 app-server 在 Linux 上对着假飞书实测过，结果见「工具随常驻进程热更新」。
 
 真实环境（Linux）验证过：闲时唤醒、忙时送达、忙时合并、停、撤回事件、定时（一次性、等进程、暂停后补发、离线补发）、常驻进程被杀后恢复。没有验证过：真实断网下的长连接重连（由官方 SDK 负责）、`daily` 和 `weekly` 到点触发（只有单测）、Windows 上的真实会话。
