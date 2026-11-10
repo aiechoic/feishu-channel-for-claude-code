@@ -75,6 +75,29 @@ test('投递超时不自动重试、不确认', async () => {
   assert.equal(rpc.calls.length, 1)
 })
 
+test('压缩轮次完成事件立即触发重读，不等待五秒兜底', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  rpc.active = 'compact'
+  const request = rpc.request.bind(rpc)
+  let done
+  rpc.request = async (method, params) => {
+    if (method === 'turn/steer') {
+      done = setTimeout(() => {
+        rpc.active = null
+        rpc.emit('notification', { method: 'turn/completed', params: { threadId: 'thread1', turn: { id: 'compact' } } })
+      }, 25)
+      throw new Error('cannot steer a compact turn')
+    }
+    return request(method, params)
+  }
+  let deadline
+  try {
+    await Promise.race([s.accept(message()), new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('未按完成事件唤醒')), 1500) })])
+  } finally { clearTimeout(done); clearTimeout(deadline) }
+  assert.equal(s.listenerCount('turn-finished'), 0)
+  assert.equal(s.accepted.size, 1)
+})
+
 test('压缩重试遇到停止屏障时等待完成，不越过屏障投递', async () => {
   const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
   rpc.active = 'compact'
