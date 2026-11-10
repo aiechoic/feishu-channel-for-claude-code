@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { channelInput } from './codex-rpc.mjs'
 
 export const deliveryKey = m => createHash('sha256').update(JSON.stringify([m.meta.chat_id, m.meta.message_id, m.content])).digest('hex')
@@ -48,25 +49,42 @@ export class CodexSession extends EventEmitter {
       if (this.accepted.has(key)) return key
       if (this.stopped) throw new Error('停止中，保留消息等待本轮结束')
       const input = channelInput(m, key)
-      // 通知之后轮次可能已结束，投递前重新读取当前状态。
-      const { thread } = await this.rpc.request('thread/read', { threadId: this.threadId, includeTurns: true })
-      if (thread.turns?.some(t => t.items?.some(i => i.type === 'userMessage' && i.content?.some(c => c.type === 'text' && c.text.includes(`[feishu-delivery:${key}]`))))) {
+      let deferred = false
+      for (;;) {
+        // 压缩拒绝明确表示未接收；等待后重新读取轮次和历史，不能盲重发。
+        if (deferred && this.stopped) { await sleep(1000); continue }
+        // 通知之后轮次可能已结束，投递前重新读取当前状态。
+        const { thread } = await this.rpc.request('thread/read', { threadId: this.threadId, includeTurns: true })
+        if (thread.turns?.some(t => t.items?.some(i => i.type === 'userMessage' && i.content?.some(c => c.type === 'text' && c.text.includes(`[feishu-delivery:${key}]`))))) {
+          this.accepted.add(key)
+          this.emit('accepted', key)
+          return key
+        }
+        const active = thread.turns?.findLast(t => t.status === 'inProgress')
+        if (this.stopped) {
+          if (deferred) { await sleep(1000); continue }
+          throw new Error('停止中，未送出')
+        }
+        if (active) {
+          this.turnId = active.id
+          try {
+            await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId: active.id, input, clientUserMessageId: `feishu:${key}` })
+          } catch (error) {
+            // 超时或其他错误可能已经投递，不属于安全重试范围。
+            if (error.message !== 'cannot steer a compact turn') throw error
+            if (!deferred) this.emit('deferred', key)
+            deferred = true
+            await sleep(1000)
+            continue
+          }
+        } else {
+          const result = await this.rpc.request('turn/start', { threadId: this.threadId, input, clientUserMessageId: `feishu:${key}` })
+          this.turnId = result.turn.id
+        }
         this.accepted.add(key)
         this.emit('accepted', key)
         return key
       }
-      const active = thread.turns?.findLast(t => t.status === 'inProgress')
-      if (this.stopped) throw new Error('停止中，未送出')
-      if (active) {
-        this.turnId = active.id
-        await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId: active.id, input, clientUserMessageId: `feishu:${key}` })
-      } else {
-        const result = await this.rpc.request('turn/start', { threadId: this.threadId, input, clientUserMessageId: `feishu:${key}` })
-        this.turnId = result.turn.id
-      }
-      this.accepted.add(key)
-      this.emit('accepted', key)
-      return key
     })
     this.serial = task.catch(() => {})
     return task

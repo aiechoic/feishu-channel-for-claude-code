@@ -2,6 +2,7 @@
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 let active = null, sequence = 0
+let compactRejected = false
 const send = m => console.log(JSON.stringify(m))
 const notify = (method, params) => send({ method, params: { threadId: 'thread_example', ...params } })
 createInterface({ input: process.stdin }).on('line', line => {
@@ -9,6 +10,11 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.id === undefined) return
   appendFileSync(`${process.env.FAKE}/codex.log`, JSON.stringify(m) + '\n')
   let result = {}
+  if (m.method === 'turn/steer' && process.env.FAKE_COMPACT_ONCE === '1' && !compactRejected) {
+    compactRejected = true
+    send({ id: m.id, error: { code: -32600, message: 'cannot steer a compact turn' } })
+    return
+  }
   if (m.method === 'thread/start' || m.method === 'thread/resume') result = { thread: { id: 'thread_example' } }
   if (m.method === 'thread/read') result = { thread: { turns: active ? [{ id: active, status: 'inProgress' }] : [] } }
   if (m.method === 'turn/start') {

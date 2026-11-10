@@ -23,6 +23,7 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
   writeFileSync(join(dir, 'cli_example-seen.txt'), 'om_old')
   const env = { ...process.env, FEISHU_CHANNEL_CONFIG: cfgFile, FEISHU_ADAPTER: join(root, 'test/fake-feishu.mjs'), FAKE: dir,
     FEISHU_TEST_PROCESS_DIR: dir,
+    FAKE_COMPACT_ONCE: '1',
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(join(root, 'test/owned-daemon.mjs')).href}` }
   const read = name => existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : ''
   const calls = () => read('codex.log').trim().split('\n').filter(Boolean).map(JSON.parse)
@@ -64,10 +65,15 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
     const merged = calls().find(m => m.method === 'turn/start').params.input[0].text
     assert.match(merged, /om_a1,om_a2,om_a3/)
     add('om_b', 'busy addition')
-    await until(() => calls().some(m => m.method === 'turn/steer'))
+    await until(() => calls().filter(m => m.method === 'turn/steer').length === 2)
+    await until(() => JSON.parse(read('cli_example-state.json')).delivered?.om_b)
+    assert.equal(receiver.exitCode, null, '压缩拒绝不退出接收端')
+    const retryCalls = calls().filter(m => m.method === 'turn/steer')
+    assert.equal(retryCalls[0].params.clientUserMessageId, retryCalls[1].params.clientUserMessageId)
+    assert.equal(JSON.parse(read('cli_example-state.json')).queue.some(m => m.message_id === 'om_b'), false)
     add('om_bad', 'ignored', 'ou_bad')
     await sleep(150)
-    assert.equal(calls().filter(m => ['turn/start', 'turn/steer'].includes(m.method)).length, 2)
+    assert.equal(calls().filter(m => ['turn/start', 'turn/steer'].includes(m.method)).length, 3)
     const reply = await client.callTool({ name: 'reply', arguments: { chat_id: 'oc_group', text: 'reply test' } })
     assert.ok(!reply.isError)
     assert.match(read('sent.txt'), /reply test/)

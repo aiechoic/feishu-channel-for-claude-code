@@ -80,6 +80,7 @@ session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.
 session.on('killed', ids => console.log(`Codex command cleanup: killed ${ids.join(' ')}`))
 session.turnId = thread.turns?.findLast(t => t.status === 'inProgress')?.id ?? null
 session.on('accepted', persist)
+session.on('deferred', key => console.log(`Codex 压缩中，保留投递 ${key}，等待轮次恢复`))
 session.on('failure', e => { console.error(e.message); exit(1) })
 session.on('hook', h => accepting ? bufferedHooks.push(h) : send(h))
 persist()
