@@ -18,6 +18,126 @@ class FakeRpc extends EventEmitter {
 }
 const message = (content = 'one') => ({ pushId: 'p1', content, meta: { chat_id: 'oc_example', message_id: 'om_example' } })
 
+test('压缩拒绝保留投递，轮次结束后启动一次并去重', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  rpc.active = 'compact'
+  const request = rpc.request.bind(rpc)
+  let rejected = false, persisted = 0
+  s.on('accepted', () => persisted++)
+  rpc.request = async (method, params) => {
+    if (method === 'turn/steer') {
+      rpc.calls.push({ method, params })
+      rejected = true
+      assert.equal(s.accepted.size, 0)
+      rpc.active = null
+      throw new Error('cannot steer a compact turn')
+    }
+    return request(method, params)
+  }
+  await s.accept(message())
+  assert.ok(rejected)
+  assert.equal(persisted, 1)
+  assert.equal(rpc.calls.filter(c => c.method === 'turn/start').length, 1)
+  await s.accept(message())
+  assert.equal(persisted, 1)
+})
+
+test('压缩结束仍有活动轮次时重新读取并 steer，后续消息保持串行', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  rpc.active = 'compact'
+  const request = rpc.request.bind(rpc)
+  let attempts = 0
+  rpc.request = async (method, params) => {
+    if (method === 'turn/steer' && attempts++ === 0) {
+      rpc.calls.push({ method, params })
+      rpc.active = 'normal'
+      throw new Error('cannot steer a compact turn')
+    }
+    return request(method, params)
+  }
+  await Promise.all([s.accept(message()), s.accept(message('two'))])
+  const steers = rpc.calls.filter(c => c.method === 'turn/steer')
+  assert.deepEqual(steers.map(c => c.params.expectedTurnId), ['compact', 'normal', 'normal'])
+  assert.equal(s.accepted.size, 2)
+  assert.equal(rpc.calls.filter(c => c.method === 'turn/start').length, 0)
+})
+
+test('投递超时不自动重试、不确认', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  rpc.active = 'normal'
+  const request = rpc.request.bind(rpc)
+  rpc.request = async (method, params) => {
+    if (method === 'turn/steer') throw new Error('RPC timeout: turn/steer; delivery uncertain')
+    return request(method, params)
+  }
+  await assert.rejects(s.accept(message()), /delivery uncertain/)
+  assert.equal(s.accepted.size, 0)
+  assert.equal(rpc.calls.length, 1)
+})
+
+test('压缩轮次完成事件立即触发重读，不等待五秒兜底', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  rpc.active = 'compact'
+  const request = rpc.request.bind(rpc)
+  let done
+  rpc.request = async (method, params) => {
+    if (method === 'turn/steer') {
+      done = setTimeout(() => {
+        rpc.active = null
+        rpc.emit('notification', { method: 'turn/completed', params: { threadId: 'thread1', turn: { id: 'compact' } } })
+      }, 25)
+      throw new Error('cannot steer a compact turn')
+    }
+    return request(method, params)
+  }
+  let deadline
+  try {
+    await Promise.race([s.accept(message()), new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('未按完成事件唤醒')), 1500) })])
+  } finally { clearTimeout(done); clearTimeout(deadline) }
+  assert.equal(s.listenerCount('turn-finished'), 0)
+  assert.equal(s.accepted.size, 1)
+})
+
+test('压缩重试遇到停止屏障时等待完成，不越过屏障投递', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
+  rpc.active = 'compact'
+  const request = rpc.request.bind(rpc)
+  let complete
+  rpc.request = async (method, params) => {
+    if (method === 'turn/steer') {
+      s.stopped = true
+      complete = setTimeout(() => {
+        assert.equal(s.accepted.size, 0)
+        rpc.active = null
+        rpc.emit('notification', { method: 'turn/completed', params: { threadId: 'thread1', turn: { id: 'compact' } } })
+      }, 1200)
+      throw new Error('cannot steer a compact turn')
+    }
+    return request(method, params)
+  }
+  try { await s.accept(message()) } finally { clearTimeout(complete) }
+  assert.equal(s.accepted.size, 1)
+  assert.equal(rpc.calls.filter(c => c.method === 'turn/start').length, 1)
+})
+
+test('压缩等待后历史已有投递标记时仅确认，不再次发送', async () => {
+  const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1'), m = message()
+  let reads = 0, steers = 0
+  rpc.request = async method => {
+    if (method === 'thread/read') {
+      reads++
+      return { thread: { turns: reads === 1 ? [{ id: 'compact', status: 'inProgress' }] : [{ items: [{ type: 'userMessage', content: [{ type: 'text', text: `[feishu-delivery:${deliveryKey(m)}]` }] }] }] } }
+    }
+    assert.equal(method, 'turn/steer')
+    steers++
+    throw new Error('cannot steer a compact turn')
+  }
+  await s.accept(m)
+  assert.equal(steers, 1)
+  assert.equal(reads, 2)
+  assert.equal(s.accepted.size, 1)
+})
+
 test('idle starts, busy steers with active-turn precondition, accepted messages deduplicate across retries', async () => {
   const rpc = new FakeRpc(), s = new CodexSession(rpc, 'thread1')
   await s.accept(message())

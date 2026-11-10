@@ -19,6 +19,16 @@ export class CodexSession extends EventEmitter {
   }
   hook(event, extra = {}) { this.emit('hook', { t: 'hook', event, ...extra }) }
   heartbeat() { this.hook('PostToolUse', { toolUseId: 'codex-heartbeat' }) }
+  /** 优先等目标轮次完成；漏通知时每五秒兜底，等待期间不阻挡 hook。 */
+  waitForTurn(target) {
+    if (target && this.turnId !== target) return Promise.resolve()
+    return new Promise(resolve => {
+      const done = () => { clearTimeout(timer); this.off('turn-finished', finished); resolve() }
+      const finished = turn => { if (!target || turn.id === target) done() }
+      const timer = setTimeout(done, 5000)
+      this.on('turn-finished', finished)
+    })
+  }
   /** 同轮 steer 不伪造新指令，保留 daemon 内尚未配对的工具。 */
   deliveryHook(previousTurn) {
     return previousTurn && previousTurn === this.turnId ? null : { t: 'hook', event: 'UserPromptSubmit' }
@@ -48,25 +58,44 @@ export class CodexSession extends EventEmitter {
       if (this.accepted.has(key)) return key
       if (this.stopped) throw new Error('停止中，保留消息等待本轮结束')
       const input = channelInput(m, key)
-      // 通知之后轮次可能已结束，投递前重新读取当前状态。
-      const { thread } = await this.rpc.request('thread/read', { threadId: this.threadId, includeTurns: true })
-      if (thread.turns?.some(t => t.items?.some(i => i.type === 'userMessage' && i.content?.some(c => c.type === 'text' && c.text.includes(`[feishu-delivery:${key}]`))))) {
+      let deferred = false
+      for (;;) {
+        // 压缩拒绝明确表示未接收；等待后重新读取轮次和历史，不能盲重发。
+        if (deferred && this.stopped) { await this.waitForTurn(this.turnId); continue }
+        // 通知之后轮次可能已结束，投递前重新读取当前状态。
+        const { thread } = await this.rpc.request('thread/read', { threadId: this.threadId, includeTurns: true })
+        if (thread.turns?.some(t => t.items?.some(i => i.type === 'userMessage' && i.content?.some(c => c.type === 'text' && c.text.includes(`[feishu-delivery:${key}]`))))) {
+          this.accepted.add(key)
+          this.emit('accepted', key)
+          return key
+        }
+        const active = thread.turns?.findLast(t => t.status === 'inProgress')
+        if (this.stopped) {
+          if (deferred) { await this.waitForTurn(this.turnId); continue }
+          throw new Error('停止中，未送出')
+        }
+        if (active) {
+          this.turnId = active.id
+          this.emit('submitting')
+          try {
+            await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId: active.id, input, clientUserMessageId: `feishu:${key}` })
+          } catch (error) {
+            // 超时或其他错误可能已经投递，不属于安全重试范围。
+            if (error.message !== 'cannot steer a compact turn') throw error
+            this.emit('deferred', key)
+            deferred = true
+            await this.waitForTurn(active.id)
+            continue
+          }
+        } else {
+          this.emit('submitting')
+          const result = await this.rpc.request('turn/start', { threadId: this.threadId, input, clientUserMessageId: `feishu:${key}` })
+          this.turnId = result.turn.id
+        }
         this.accepted.add(key)
         this.emit('accepted', key)
         return key
       }
-      const active = thread.turns?.findLast(t => t.status === 'inProgress')
-      if (this.stopped) throw new Error('停止中，未送出')
-      if (active) {
-        this.turnId = active.id
-        await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId: active.id, input, clientUserMessageId: `feishu:${key}` })
-      } else {
-        const result = await this.rpc.request('turn/start', { threadId: this.threadId, input, clientUserMessageId: `feishu:${key}` })
-        this.turnId = result.turn.id
-      }
-      this.accepted.add(key)
-      this.emit('accepted', key)
-      return key
     })
     this.serial = task.catch(() => {})
     return task

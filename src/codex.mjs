@@ -80,6 +80,16 @@ session = new CodexSession(rpc, thread.id, saved.threadId === thread.id ? saved.
 session.on('killed', ids => console.log(`Codex command cleanup: killed ${ids.join(' ')}`))
 session.turnId = thread.turns?.findLast(t => t.status === 'inProgress')?.id ?? null
 session.on('accepted', persist)
+function flushHooks() {
+  accepting = false
+  for (const hook of bufferedHooks) send(hook)
+  bufferedHooks = []
+}
+session.on('submitting', () => { accepting = true })
+session.on('deferred', key => {
+  flushHooks()
+  console.log(`Codex 压缩中，保留投递 ${key}，等待轮次恢复`)
+})
 session.on('failure', e => { console.error(e.message); exit(1) })
 session.on('hook', h => accepting ? bufferedHooks.push(h) : send(h))
 persist()
@@ -97,16 +107,13 @@ function dial() {
     try {
       const m = JSON.parse(line)
       if (m.t !== 'push') return
-      accepting = true
       const previousTurn = session.turnId
       await session.accept(m)
       // RPC 接受投递后先确认，再仅为新轮次发送唤醒 hook。
       send({ t: 'ack', pushId: m.pushId })
       const confirmation = session.deliveryHook(previousTurn)
       if (confirmation) send(confirmation)
-      accepting = false
-      for (const hook of bufferedHooks) send(hook)
-      bufferedHooks = []
+      flushHooks()
     } catch (e) {
       // 投递结果不明时不确认，恢复前由操作者核对会话。
       console.error(`Codex delivery failed: ${e.message}`)

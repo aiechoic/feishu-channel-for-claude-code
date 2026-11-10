@@ -43,6 +43,7 @@ node src/codex.mjs /path/to/config.json
 - 没有实现执行前同步拒绝每次工具调用的 Codex PreToolUse 门禁；停止期间的工具开始事件触发再次清理和中断，属于补偿措施。Windows 清理使用 taskkill /T /F；Linux 使用现有 proc.killTree。Linux 的真实 Codex 命令包装格式尚需单独验收。
 - Q497 联测：心跳只发送独立 ID 的 PostToolUse，不伪造 Pre，不删除其他待完成工具。同轮 steer 不发送会清空待完成工具的 UserPromptSubmit；turn/completed 发送 Stop，即使没有 item/completed 也清理等待状态和命令归属记录。
 - 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
+- Codex 压缩期间明确返回 `cannot steer a compact turn` 时，接收端保持连接，不确认该批消息，优先等待目标轮次完成事件后重新读取轮次和历史；未收到事件时每五秒兜底重试；压缩结束后按当前状态补充到活动轮次或开启新轮次。历史中的投递标记和固定消息 ID 用于去重；停止期间等待轮次结束。仅投递 RPC 在途时暂存 hook，压缩等待阶段继续上报心跳和忙闲状态。RPC 超时等结果不明的错误仍保留队列并退出，避免静默重复执行。
 - 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
 - 白名单规则保持不变。配置 `observe` 时，白名单外消息标明仅供观察，不能当作执行授权。本部署应不设置 `observe`。
 

@@ -10,8 +10,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-async function until(fn) {
-  for (let i = 0; i < 200; i++) { if (fn()) return; await sleep(50) }
+async function until(fn, attempts = 200) {
+  for (let i = 0; i < attempts; i++) { if (fn()) return; await sleep(50) }
   assert.fail('integration timeout')
 }
 test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, recall, schedule and resume', async () => {
@@ -23,6 +23,7 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
   writeFileSync(join(dir, 'cli_example-seen.txt'), 'om_old')
   const env = { ...process.env, FEISHU_CHANNEL_CONFIG: cfgFile, FEISHU_ADAPTER: join(root, 'test/fake-feishu.mjs'), FAKE: dir,
     FEISHU_TEST_PROCESS_DIR: dir,
+    FAKE_COMPACT_ONCE: '1',
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(join(root, 'test/owned-daemon.mjs')).href}` }
   const read = name => existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : ''
   const calls = () => read('codex.log').trim().split('\n').filter(Boolean).map(JSON.parse)
@@ -65,9 +66,24 @@ test('owned Codex + real daemon + tools-only MCP: whitelist, busy steer, stop, r
     assert.match(merged, /om_a1,om_a2,om_a3/)
     add('om_b', 'busy addition')
     await until(() => calls().some(m => m.method === 'turn/steer'))
+    const reads = calls().filter(m => m.method === 'thread/read').length
+    await sleep(1200)
+    assert.equal(calls().filter(m => m.method === 'thread/read').length, reads, '等待事件期间不每秒拉取长历史')
+    assert.match(read('cli_example.log'), /hook PreToolUse commandExecution/, '等待期间工具 hook 送达 daemon')
+    const posts = () => (read('cli_example.log').match(/hook PostToolUse/g) ?? []).length
+    const initialPosts = posts()
+    await until(() => posts() > initialPosts, 300)
+    assert.ok(JSON.parse(read('cli_example-state.json')).queue.some(m => m.message_id === 'om_b'), '心跳到达时投递仍在等待')
+    await until(() => JSON.parse(read('cli_example-state.json')).delivered?.om_b, 400)
+    assert.equal(receiver.exitCode, null, '压缩拒绝不退出接收端')
+    const retryCalls = calls().filter(m => m.method === 'turn/steer')
+    assert.ok(retryCalls.length >= 2)
+    assert.ok(retryCalls.every(c => c.params.clientUserMessageId === retryCalls[0].params.clientUserMessageId))
+    assert.equal(JSON.parse(read('cli_example-state.json')).queue.some(m => m.message_id === 'om_b'), false)
     add('om_bad', 'ignored', 'ou_bad')
+    const deliveredCalls = calls().filter(m => ['turn/start', 'turn/steer'].includes(m.method)).length
     await sleep(150)
-    assert.equal(calls().filter(m => ['turn/start', 'turn/steer'].includes(m.method)).length, 2)
+    assert.equal(calls().filter(m => ['turn/start', 'turn/steer'].includes(m.method)).length, deliveredCalls)
     const reply = await client.callTool({ name: 'reply', arguments: { chat_id: 'oc_group', text: 'reply test' } })
     assert.ok(!reply.isError)
     assert.match(read('sent.txt'), /reply test/)

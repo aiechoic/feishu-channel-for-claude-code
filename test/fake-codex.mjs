@@ -2,6 +2,7 @@
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 let active = null, sequence = 0
+let compactUntil = 0
 const send = m => console.log(JSON.stringify(m))
 const notify = (method, params) => send({ method, params: { threadId: 'thread_example', ...params } })
 createInterface({ input: process.stdin }).on('line', line => {
@@ -9,6 +10,18 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.id === undefined) return
   appendFileSync(`${process.env.FAKE}/codex.log`, JSON.stringify(m) + '\n')
   let result = {}
+  if (m.method === 'turn/steer' && process.env.FAKE_COMPACT_ONCE === '1' && compactUntil === 0) {
+    compactUntil = Date.now() + 11_000
+    // 等待阶段仍发工具生命周期，不能等投递结束才转发给 daemon。
+    setTimeout(() => {
+      notify('item/started', { item: { id: 'during-compact', type: 'commandExecution' } })
+      notify('item/completed', { item: { id: 'during-compact', type: 'commandExecution' } })
+    }, 100)
+  }
+  if (m.method === 'turn/steer' && Date.now() < compactUntil) {
+    send({ id: m.id, error: { code: -32600, message: 'cannot steer a compact turn' } })
+    return
+  }
   if (m.method === 'thread/start' || m.method === 'thread/resume') result = { thread: { id: 'thread_example' } }
   if (m.method === 'thread/read') result = { thread: { turns: active ? [{ id: active, status: 'inProgress' }] : [] } }
   if (m.method === 'turn/start') {
