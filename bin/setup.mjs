@@ -3,6 +3,7 @@
 import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { configFile, HERE } from '../src/common.mjs'
+import { channelCommand, writeClaudeFiles } from '../src/claude-launch.mjs'
 
 const codexMode = process.argv.includes('--codex')
 process.argv = process.argv.filter(a => a !== '--codex')
@@ -16,18 +17,6 @@ if (codexMode) {
   console.log(`MCP fragment: ${join(dir, 'codex.config.toml')}; session events provide lifecycle reporting, no Claude hooks installed.`)
   process.exit(0)
 }
-const env = { FEISHU_CHANNEL_CONFIG: cfgFile }
-// hook 命令：配置文件当参数传，不写 `VAR=… node` 这种只有 sh 认的前缀 —— Windows 上 hook 不一定由 sh 执行。
-// 路径一律用正斜杠加双引号：sh、cmd、PowerShell 都认，Node 在 Windows 上也认正斜杠。
-const q = p => JSON.stringify(p.replaceAll('\\', '/'))
-const hook = { type: 'command', command: `node ${q(join(HERE, 'hook.mjs'))} ${q(cfgFile)}`, timeout: 5 }
-const plain = [{ hooks: [hook] }]
-const tools = [{ matcher: '*', hooks: [hook] }]
-
-writeFileSync(join(dir, 'mcp.json'), JSON.stringify({
-  mcpServers: { feishu: { command: 'node', args: [join(HERE, 'bridge.mjs')], env } },
-}, null, 2))
-writeFileSync(join(dir, 'settings.json'), JSON.stringify({
-  hooks: { UserPromptSubmit: plain, Stop: plain, PreToolUse: tools, PostToolUse: tools, PostToolUseFailure: tools },
-}, null, 2))
-console.log(`claude --mcp-config ${q(join(dir, 'mcp.json'))} --settings ${q(join(dir, 'settings.json'))} --dangerously-load-development-channels server:feishu`)
+writeClaudeFiles(cfgFile)
+console.log(channelCommand(cfgFile))
+console.log('装了 team-claude（node bin/install.mjs）的话，以后在工作目录直接打 team-claude。')
