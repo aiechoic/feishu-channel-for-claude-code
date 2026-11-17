@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 /**
- * 装 team-claude 命令：node bin/install.mjs [--dir <目录>] [--force]
+ * 装 team-claude 命令：node bin/install.mjs [--config <配置文件>] [--dir <目录>] [--force]
  *
  * Linux / macOS：写 /usr/local/bin/team-claude；那里不可写时退到 ~/.local/bin。
  * Windows：写 team-claude.cmd（cmd、PowerShell 用）和 team-claude（Git Bash 用）到 npm 全局 bin 目录（`npm prefix -g`）。
  * --dir 指定装到哪个目录。装的是一行转发到本仓库 bin/start.mjs 的小脚本，重复跑就是覆盖成指向当前这份仓库。
  * 目标位置已有一个不是本命令装的 team-claude 时不覆盖，除非带 --force。
+ *
+ * 配置文件：--config，否则装的那一刻环境里的 FEISHU_CHANNEL_CONFIG，都没有就不写。
+ * 写进脚本的排在运行时的环境变量和工作目录里的 .feishu-channel/config.json 后面，顺序见 start.mjs。
+ * 指定的配置文件不存在就不装。
  */
 import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { HERE } from '../src/common.mjs'
+import { defaultConfigFile, INSTALLED_CONFIG_ENV } from '../src/claude-launch.mjs'
 
 const MARK = 'team-claude: feishu-channel-for-claude-code'
 const START = resolve(HERE, '..', 'bin', 'start.mjs').replaceAll('\\', '/')
@@ -19,14 +24,29 @@ const isWin = process.platform === 'win32'
 
 const argv = process.argv.slice(2)
 const force = argv.includes('--force')
-const dirArg = argv.includes('--dir') ? argv[argv.indexOf('--dir') + 1] : null
-if (argv.includes('--dir') && !dirArg) {
-  console.error('--dir 后面要跟目录')
+function option(name) {
+  const i = argv.indexOf(name)
+  if (i < 0) return null
+  const v = argv[i + 1]
+  if (!v || v.startsWith('--')) {
+    console.error(`${name} 后面要跟路径`)
+    process.exit(1)
+  }
+  return v
+}
+const dirArg = option('--dir')
+const cfgArg = option('--config') ?? process.env.FEISHU_CHANNEL_CONFIG ?? null
+const cfg = cfgArg && resolve(cfgArg)
+if (cfg && !existsSync(cfg)) {
+  console.error(`配置文件 ${cfg} 不存在（来自 ${option('--config') ? '--config' : '环境变量 FEISHU_CHANNEL_CONFIG'}），没有装。`)
   process.exit(1)
 }
 
-const sh = `#!/bin/sh\n# ${MARK}\nexec node ${JSON.stringify(START)} "$@"\n`
-const cmd = `@echo off\r\nrem ${MARK}\r\nnode ${JSON.stringify(START)} %*\r\n`
+// sh：单引号里原样，单引号本身写成 '\''；cmd：% 写成 %%，路径里不会有双引号（Windows 文件名不许）
+const shq = p => `'${p.replaceAll("'", "'\\''")}'`
+const cmdq = p => p.replaceAll('%', '%%')
+const sh = `#!/bin/sh\n# ${MARK}\n${cfg ? `${INSTALLED_CONFIG_ENV}=${shq(cfg)} ` : ''}exec node ${shq(START)} "$@"\n`
+const cmd = `@echo off\r\nrem ${MARK}\r\nsetlocal\r\n${cfg ? `set "${INSTALLED_CONFIG_ENV}=${cmdq(cfg)}"\r\n` : ''}node "${cmdq(START)}" %*\r\n`
 const files = isWin ? [['team-claude.cmd', cmd], ['team-claude', sh]] : [['team-claude', sh]]
 
 /** 往 dir 里写；目录不可写返回 false，其他错误照抛 */
@@ -68,6 +88,7 @@ if (!dir) {
   process.exit(1)
 }
 for (const [name] of files) console.log(`已装 ${join(dir, name)} → ${START}`)
+console.log(`配置：${cfg ?? `不写（运行时按环境变量 FEISHU_CHANNEL_CONFIG → 工作目录的 .feishu-channel/config.json → ${defaultConfigFile()} 找）`}`)
 if (dir !== candidates[0]) console.log(`${candidates[0]} 不可写，装到了 ${dir}。`)
 
 const norm = p => resolve(p).replace(/[\\/]+$/, '').toLowerCase()

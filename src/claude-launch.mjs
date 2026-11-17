@@ -1,11 +1,39 @@
 // Claude Code 接这个桥要的两份文件（mcp.json、settings.json）和启动参数：setup.mjs、start.mjs 共用
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { HERE } from './common.mjs'
 
 /** 默认配置文件位置（Windows 上 homedir() 就是 %USERPROFILE%） */
 export const defaultConfigFile = () => join(homedir(), '.config', 'feishu-channel', 'config.json')
+
+/** 装出的 team-claude 脚本用这个变量把 install --config 的路径交给 start.mjs */
+export const INSTALLED_CONFIG_ENV = 'TEAM_CLAUDE_INSTALLED_CONFIG'
+
+/** 从 cwd 往上找 .feishu-channel/config.json，找不到返回 null */
+export function findWorkdirConfig(cwd) {
+  for (let d = resolve(cwd); ; d = dirname(d)) {
+    const f = join(d, '.feishu-channel', 'config.json')
+    if (existsSync(f)) return f
+    if (dirname(d) === d) return null
+  }
+}
+
+/**
+ * team-claude 用哪份配置：环境变量 FEISHU_CHANNEL_CONFIG → 工作目录往上的 .feishu-channel/config.json
+ * → install 时写进去的 --config → ~/.config/feishu-channel/config.json。
+ * 同一个系统用户下几个机器人（各自一个工作目录）共用一个 team-claude 时，靠第二步分开。
+ * 返回 { file, source }，source 是 'env' | 'workdir' | 'installed' | 'default'；不保证文件存在（除了 workdir）。
+ */
+export function resolveConfig(cwd = process.cwd(), env = process.env) {
+  if (env.FEISHU_CHANNEL_CONFIG) return { file: resolve(cwd, env.FEISHU_CHANNEL_CONFIG), source: 'env' }
+  const w = findWorkdirConfig(cwd)
+  if (w) return { file: w, source: 'workdir' }
+  if (env[INSTALLED_CONFIG_ENV]) return { file: resolve(env[INSTALLED_CONFIG_ENV]), source: 'installed' }
+  return { file: defaultConfigFile(), source: 'default' }
+}
+
+export const SOURCE_LABEL = { env: '环境变量', workdir: '工作目录', installed: '安装时指定', default: '默认' }
 
 // 路径一律用正斜杠加双引号：sh、cmd、PowerShell 都认，Node 在 Windows 上也认正斜杠。
 const q = p => JSON.stringify(p.replaceAll('\\', '/'))

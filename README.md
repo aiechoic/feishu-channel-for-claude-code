@@ -136,7 +136,13 @@ node bin/install.mjs
 
 每次启动它：
 
-1. 找配置：环境变量 `FEISHU_CHANNEL_CONFIG`，否则 `~/.config/feishu-channel/config.json`（Windows 是 `%USERPROFILE%` 下的同一路径）。找不到就说明该建在哪，退出 1。
+1. 找配置，按顺序取第一个：
+   1. 环境变量 `FEISHU_CHANNEL_CONFIG`（临时换配置用）；
+   2. 从当前目录往上找到的 `.feishu-channel/config.json`；
+   3. 装命令时 `--config` 写进去的路径；
+   4. `~/.config/feishu-channel/config.json`（Windows 是 `%USERPROFILE%` 下的同一路径）。
+
+   启动时打一行「配置：<路径>（来源：环境变量 / 工作目录 / 安装时指定 / 默认）」，看得出用的是哪个机器人。找不到就说明该建在哪，退出 1。
 2. 配置目录里的 `mcp.json`、`settings.json` 缺了，或指向的不是这份仓库（仓库挪过位置、换过一份），按 `setup.mjs` 的逻辑重新生成；一致时不动。
 3. 带上 `--mcp-config`、`--settings`、`--dangerously-load-development-channels server:feishu` 起 `claude`，终端直接交给它，退出码原样返回。
 
@@ -146,9 +152,12 @@ node bin/install.mjs
 
 - Linux / macOS：`/usr/local/bin/team-claude`；不可写时装到 `~/.local/bin`，那里不在 `PATH` 上会提示怎么加。
 - Windows：npm 全局 bin 目录（`npm prefix -g`）下的 `team-claude.cmd`（cmd、PowerShell 用）和 `team-claude`（Git Bash 用）。`claude` 先找 `claude.exe`（原生安装），再找 `claude.cmd`（npm 安装）。
+- `--config <配置文件>` 把配置路径写进装出的脚本，配置不在默认位置时用。不带时取装的那一刻环境里的 `FEISHU_CHANNEL_CONFIG`，都没有就不写。文件不存在就不装，装完打印「配置：<路径>」。
 - `--dir <目录>` 装到指定目录。重复跑就是覆盖成指向当前这份仓库；目标位置已有别的程序装的 `team-claude` 时不覆盖，确认要换加 `--force`。
 
 装的只是一行转发到本仓库 `bin/start.mjs` 的脚本，仓库挪了位置要在新位置再跑一次 `install.mjs`。
+
+一个系统用户下跑几个机器人（共用一个 `team-claude`）时，不要用 `--config`，把各自的配置放进各自工作目录的 `.feishu-channel/config.json`：`mcp.json`、`settings.json` 也生成在那里。工作目录是 git 仓库的话把 `.feishu-channel/` 加进 `.gitignore`。
 
 ## 配置
 

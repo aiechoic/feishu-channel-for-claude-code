@@ -6,24 +6,28 @@
  *   team-claude --new      强制开新会话
  *   team-claude <其他参数>  原样传给 claude；自己带了 -c / -r / --resume / --session-id 时不再加 --continue
  *
- * 配置文件：环境变量 FEISHU_CHANNEL_CONFIG，否则 ~/.config/feishu-channel/config.json。
+ * 配置文件，按顺序：环境变量 FEISHU_CHANNEL_CONFIG → 当前目录往上的 .feishu-channel/config.json
+ * → install 时 --config 写进去的 → ~/.config/feishu-channel/config.json。启动时打印用的是哪份、从哪来。
  * 配置目录里的 mcp.json、settings.json 缺了或指向的不是这份仓库，启动前重新生成。
  * 退出码跟 claude 一致；配置或 claude 找不到时退出 1。
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { buildArgs, cmdLine, defaultConfigFile, findClaude, writeClaudeFiles } from '../src/claude-launch.mjs'
+import { buildArgs, cmdLine, findClaude, INSTALLED_CONFIG_ENV, resolveConfig, SOURCE_LABEL, writeClaudeFiles } from '../src/claude-launch.mjs'
 
 const say = s => process.stderr.write(`team-claude: ${s}\n`)
 
-const cfgFile = process.env.FEISHU_CHANNEL_CONFIG ?? defaultConfigFile()
+const { file: cfgFile, source } = resolveConfig()
 if (!existsSync(cfgFile)) {
-  say(`找不到配置文件 ${cfgFile}`)
-  say(process.env.FEISHU_CHANNEL_CONFIG
-    ? '它来自环境变量 FEISHU_CHANNEL_CONFIG：改成实际的配置文件路径，或去掉这个变量用默认位置。'
-    : `照本仓库的 config.example.json 建一份放在这里（字段见 README「配置」），或用环境变量 FEISHU_CHANNEL_CONFIG 指到已有的配置文件。`)
+  say(`找不到配置文件 ${cfgFile}（来源：${SOURCE_LABEL[source]}）`)
+  say({
+    env: '改环境变量 FEISHU_CHANNEL_CONFIG 指到实际的配置文件，或去掉它。',
+    installed: '安装时 --config 指的文件不在了：重跑 node bin/install.mjs --config <配置文件>。',
+    default: '照本仓库的 config.example.json 建一份：放在工作目录的 .feishu-channel/config.json（一台机器几个机器人时用这个），或者这个默认位置；字段见 README「配置」。',
+  }[source])
   process.exit(1)
 }
+say(`配置：${cfgFile}（来源：${SOURCE_LABEL[source]}）`)
 
 for (const f of writeClaudeFiles(cfgFile, { onlyIfStale: true })) say(`已重新生成 ${f}`)
 
@@ -34,6 +38,7 @@ if (!claude) {
 }
 
 const { args, mode } = buildArgs(cfgFile, process.argv.slice(2))
+delete process.env[INSTALLED_CONFIG_ENV] // 只给这一层用，不传给 claude 里再起的命令
 say({ continue: '接着当前目录上次的会话', new: '开新会话', user: '会话参数按你给的' }[mode])
 
 // .cmd 只能经 cmd.exe 起

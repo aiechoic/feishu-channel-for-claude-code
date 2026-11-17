@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { buildArgs, cmdLine, findClaude, projectDirName } from '../src/claude-launch.mjs'
+import { buildArgs, cmdLine, findClaude, projectDirName, resolveConfig } from '../src/claude-launch.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const START = join(ROOT, 'bin', 'start.mjs')
@@ -274,4 +274,131 @@ test('Windows：先找 claude.exe 再找 claude.cmd；cmd 命令行的引号', (
     rmSync(root, { recursive: true, force: true })
   }
   assert.equal(cmdLine('C:\\x\\claude.cmd', ['--a', 'b "c"', '']), '""C:\\x\\claude.cmd" "--a" "b ""c""" """')
+})
+
+/** 跑装好的 team-claude（Linux 直接执行 sh，Windows 经 cmd.exe 跑 .cmd） */
+function runInstalled(t, dir, args, extraEnv = {}) {
+  const env = { ...t.env, PATH: `${dirname(process.execPath)}${delimiter}${t.env.PATH}`, ...extraEnv }
+  const out = join(t.root, 'claude-called.json')
+  rmSync(out, { force: true })
+  const r = isWin
+    ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `""${join(dir, 'team-claude.cmd')}" ${args.join(' ')}"`], { cwd: t.cwd, env, encoding: 'utf8', windowsVerbatimArguments: true })
+    : spawnSync(join(dir, 'team-claude'), args, { cwd: t.cwd, env, encoding: 'utf8' })
+  return { ...r, called: existsSync(out) ? JSON.parse(readFileSync(out, 'utf8')) : null }
+}
+
+const install = (t, args, extraEnv = {}) => spawnSync(process.execPath, [INSTALL, ...args], { env: { ...t.env, ...extraEnv }, encoding: 'utf8' })
+
+test('install --config：路径写进 sh / cmd，裸跑就用它；运行时的 FEISHU_CHANNEL_CONFIG、工作目录的配置排在它前面', () => {
+  const t = sandbox()
+  try {
+    const cfg = t.writeConfig(join(t.root, "it's cfg", 'config.json'))
+    const other = t.writeConfig(join(t.root, 'other', 'config.json'))
+    const dir = join(t.root, 'install dir')
+    const r = install(t, ['--dir', dir, '--config', cfg])
+    assert.equal(r.status, 0, r.stderr)
+    assert.ok(r.stdout.includes(`配置：${cfg}`), r.stdout)
+
+    const sh = readFileSync(join(dir, 'team-claude'), 'utf8')
+    assert.ok(sh.includes(`TEAM_CLAUDE_INSTALLED_CONFIG='${cfg.replaceAll("'", "'\\''")}' exec node`), sh)
+    if (isWin) {
+      const cmd = readFileSync(join(dir, 'team-claude.cmd'), 'utf8')
+      assert.ok(cmd.includes(`set "TEAM_CLAUDE_INSTALLED_CONFIG=${cfg}"`), cmd)
+      assert.match(cmd, /setlocal/, '变量不漏到调用它的 cmd 会话里')
+    }
+
+    let run = runInstalled(t, dir, ['--model', 'x'])
+    assert.equal(run.status, 0, run.stderr)
+    assert.equal(run.called.args[1], join(dirname(cfg), 'mcp.json'))
+    assert.ok(run.stderr.includes(`配置：${cfg}（来源：安装时指定）`), run.stderr)
+
+    run = runInstalled(t, dir, [], { FEISHU_CHANNEL_CONFIG: other })
+    assert.equal(run.status, 0, run.stderr)
+    assert.equal(run.called.args[1], join(dirname(other), 'mcp.json'))
+    assert.match(run.stderr, /来源：环境变量/)
+
+    const wd = t.writeConfig(join(t.cwd, '.feishu-channel', 'config.json'))
+    run = runInstalled(t, dir, [])
+    assert.equal(run.status, 0, run.stderr)
+    assert.equal(run.called.args[1], join(dirname(wd), 'mcp.json'))
+    assert.match(run.stderr, /来源：工作目录/)
+
+    rmSync(dirname(wd), { recursive: true })
+    rmSync(cfg)
+    run = runInstalled(t, dir, [])
+    assert.equal(run.status, 1)
+    assert.match(run.stderr, /来源：安装时指定/)
+    assert.match(run.stderr, /install\.mjs --config/)
+  } finally {
+    t.done()
+  }
+})
+
+test('install：不带 --config 时取装的那一刻的 FEISHU_CHANNEL_CONFIG；都没有就不写变量', () => {
+  const t = sandbox()
+  try {
+    const cfg = t.writeConfig(join(t.root, 'env cfg', 'config.json'))
+    const dir = join(t.root, 'install dir')
+    let r = install(t, ['--dir', dir], { FEISHU_CHANNEL_CONFIG: cfg })
+    assert.equal(r.status, 0, r.stderr)
+    assert.ok(r.stdout.includes(`配置：${cfg}`), r.stdout)
+    assert.ok(readFileSync(join(dir, isWin ? 'team-claude.cmd' : 'team-claude'), 'utf8').includes(cfg))
+
+    r = install(t, ['--dir', dir])
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /配置：不写/)
+    for (const name of isWin ? ['team-claude.cmd', 'team-claude'] : ['team-claude']) {
+      assert.doesNotMatch(readFileSync(join(dir, name), 'utf8'), /CONFIG/, name)
+    }
+  } finally {
+    t.done()
+  }
+})
+
+test('install：配置文件不存在就拒装，什么都不写', () => {
+  const t = sandbox()
+  try {
+    const dir = join(t.root, 'install dir')
+    let r = install(t, ['--dir', dir, '--config', join(t.root, 'nope.json')])
+    assert.equal(r.status, 1)
+    assert.match(r.stderr, /不存在（来自 --config）/)
+    assert.ok(!existsSync(dir))
+
+    r = install(t, ['--dir', dir], { FEISHU_CHANNEL_CONFIG: join(t.root, 'nope.json') })
+    assert.equal(r.status, 1)
+    assert.match(r.stderr, /不存在（来自 环境变量 FEISHU_CHANNEL_CONFIG）/)
+    assert.ok(!existsSync(dir))
+
+    r = install(t, ['--dir', dir, '--config'])
+    assert.equal(r.status, 1)
+    assert.match(r.stderr, /--config 后面要跟路径/)
+  } finally {
+    t.done()
+  }
+})
+
+test('配置查找顺序：环境变量 → 工作目录往上的 .feishu-channel/config.json → 安装时指定 → 默认', () => {
+  const t = sandbox()
+  try {
+    const sub = join(t.cwd, 'a', 'b')
+    mkdirSync(sub, { recursive: true })
+    const env = t.writeConfig(join(t.root, 'env', 'config.json'))
+    const wd = t.writeConfig(join(t.cwd, '.feishu-channel', 'config.json'))
+    const inst = t.writeConfig(join(t.root, 'inst', 'config.json'))
+    const at = (cwd, e) => resolveConfig(cwd, e)
+
+    assert.deepEqual(at(sub, { FEISHU_CHANNEL_CONFIG: env, TEAM_CLAUDE_INSTALLED_CONFIG: inst }), { file: env, source: 'env' })
+    assert.deepEqual(at(sub, { TEAM_CLAUDE_INSTALLED_CONFIG: inst }), { file: wd, source: 'workdir' }, '子目录里往上找到')
+    assert.deepEqual(at(t.root, { TEAM_CLAUDE_INSTALLED_CONFIG: inst }), { file: inst, source: 'installed' })
+    assert.equal(at(t.root, {}).source, 'default')
+    assert.equal(at(sub, { FEISHU_CHANNEL_CONFIG: 'rel/c.json' }).file, join(sub, 'rel', 'c.json'), '相对路径按当前目录算')
+
+    // 真跑：子目录里起，用工作目录那份，并打出来源
+    const r = spawnSync(process.execPath, [START], { cwd: sub, env: { ...t.env, FAKE_OUT: join(t.root, 'claude-called.json') }, encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+    assert.ok(r.stderr.includes(`配置：${wd}（来源：工作目录）`), r.stderr)
+    assert.equal(JSON.parse(readFileSync(join(t.root, 'claude-called.json'), 'utf8')).args[1], join(dirname(wd), 'mcp.json'))
+  } finally {
+    t.done()
+  }
 })
