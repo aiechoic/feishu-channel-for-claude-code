@@ -72,6 +72,8 @@ node src/codex.mjs /path/to/config.json
 | `src/hook.mjs` | Claude Code hook：上报忙闲和工具名，看到停止标记时结束这一轮 |
 | `src/feishu.mjs` | 飞书适配器，基于官方 Node SDK |
 | `bin/restart.mjs` | 重启常驻进程：凭 pid 文件认准再杀，等外层循环拉起新的 |
+| `bin/start.mjs`、`bin/install.mjs` | `team-claude` 命令本身和它的安装，见「统一启动」 |
+| `src/claude-launch.mjs` | `mcp.json`、`settings.json` 的内容和 `claude` 的启动参数，`setup.mjs` 和 `start.mjs` 共用 |
 | `src/proc.mjs` | 进程表：查子进程、杀进程树、取启动时刻；Linux 读 `/proc`，Windows 用 PowerShell 和 `taskkill` |
 
 会话关闭后常驻进程继续运行，消息和定时都留着，下次会话连上再送。
@@ -92,7 +94,7 @@ node src/codex.mjs /path/to/config.json
    ```
 
 3. 自检：`node bin/doctor.mjs`，按功能列出缺的权限和影响。核心权限缺失时退出码 1，常驻进程也不会启动。事件订阅没有查询接口，要照输出手动核对。
-4. 运行 `setup.mjs` 打印的命令。启动时要确认一次开发 channel。`-p` 模式下不生效。
+4. 运行 `setup.mjs` 打印的命令，或者装一次 `team-claude`（见「统一启动」）以后直接打它。启动时要确认一次开发 channel。`-p` 模式下不生效。
 
 生成的 hook 命令是 `node "<仓库>/src/hook.mjs" "<配置文件>"`，配置文件当参数传，sh、cmd、PowerShell 都能跑。
 
@@ -115,6 +117,38 @@ node bin\setup.mjs
 - 外层循环和常驻进程是无窗口的分离进程，关掉终端不影响；要停就在任务管理器里结束 `node`（命令行含 `supervise.mjs` 和 `daemon.mjs` 的两个）。
 
 用 `--mcp-config` 和 `--settings` 而不是项目配置：没带 channel 参数的会话不该接这个桥，也不该跑这些 hook。
+
+## 统一启动
+
+不同机器的配置目录和仓库位置不一样，`setup.mjs` 印出的命令也各不相同，重开会话时漏了参数就收不到消息。`team-claude` 把这些都包起来，每台机器装一次：
+
+```bash
+node bin/install.mjs
+```
+
+以后在工作目录打 `team-claude`：
+
+| 命令 | 做什么 |
+| --- | --- |
+| `team-claude` | 当前目录有上次的会话就接着（`--continue`），没有就开新的 |
+| `team-claude --new` | 强制开新会话 |
+| `team-claude <其他参数>` | 原样传给 `claude`；自己带了 `-c`、`-r`、`--resume`、`--session-id`、`--fork-session` 时不再加 `--continue` |
+
+每次启动它：
+
+1. 找配置：环境变量 `FEISHU_CHANNEL_CONFIG`，否则 `~/.config/feishu-channel/config.json`（Windows 是 `%USERPROFILE%` 下的同一路径）。找不到就说明该建在哪，退出 1。
+2. 配置目录里的 `mcp.json`、`settings.json` 缺了，或指向的不是这份仓库（仓库挪过位置、换过一份），按 `setup.mjs` 的逻辑重新生成；一致时不动。
+3. 带上 `--mcp-config`、`--settings`、`--dangerously-load-development-channels server:feishu` 起 `claude`，终端直接交给它，退出码原样返回。
+
+「上次的会话」按 Claude Code 记会话的目录判断：`<配置目录>/projects/<工作目录>/` 下有 `.jsonl` 就算（配置目录是 `CLAUDE_CONFIG_DIR`，默认 `~/.claude`）。
+
+装到哪：
+
+- Linux / macOS：`/usr/local/bin/team-claude`；不可写时装到 `~/.local/bin`，那里不在 `PATH` 上会提示怎么加。
+- Windows：npm 全局 bin 目录（`npm prefix -g`）下的 `team-claude.cmd`（cmd、PowerShell 用）和 `team-claude`（Git Bash 用）。`claude` 先找 `claude.exe`（原生安装），再找 `claude.cmd`（npm 安装）。
+- `--dir <目录>` 装到指定目录。重复跑就是覆盖成指向当前这份仓库；目标位置已有别的程序装的 `team-claude` 时不覆盖，确认要换加 `--force`。
+
+装的只是一行转发到本仓库 `bin/start.mjs` 的脚本，仓库挪了位置要在新位置再跑一次 `install.mjs`。
 
 ## 配置
 
