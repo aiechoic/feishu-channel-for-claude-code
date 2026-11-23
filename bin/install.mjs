@@ -3,7 +3,7 @@
  * 装 team-claude 命令：node bin/install.mjs [--config <配置文件>] [--dir <目录>] [--force]
  *
  * Linux / macOS：写 /usr/local/bin/team-claude；那里不可写时退到 ~/.local/bin。
- * Windows：写 team-claude.cmd（cmd、PowerShell 用）和 team-claude（Git Bash 用）到 npm 全局 bin 目录（`npm prefix -g`）。
+ * Windows：写 team-claude.cmd（cmd、PowerShell 用）和 team-claude（Git Bash 用）到 npm 全局 bin 目录（见 src/npm-prefix.mjs）。
  * --dir 指定装到哪个目录。装的是一行转发到本仓库 bin/start.mjs 的小脚本，重复跑就是覆盖成指向当前这份仓库。
  * 目标位置已有一个不是本命令装的 team-claude 时不覆盖，除非带 --force。
  *
@@ -11,12 +11,12 @@
  * 写进脚本的排在运行时的环境变量和工作目录里的 .feishu-channel/config.json 后面，顺序见 start.mjs。
  * 指定的配置文件不存在就不装。
  */
-import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { HERE } from '../src/common.mjs'
 import { defaultConfigFile, INSTALLED_CONFIG_ENV } from '../src/claude-launch.mjs'
+import { npmGlobalPrefix } from '../src/npm-prefix.mjs'
 
 const MARK = 'team-claude: feishu-channel-for-claude-code'
 const START = resolve(HERE, '..', 'bin', 'start.mjs').replaceAll('\\', '/')
@@ -72,10 +72,9 @@ function tryInstall(dir) {
 }
 
 function npmGlobalBin() {
-  const r = spawnSync('npm prefix -g', { shell: true, encoding: 'utf8' })
-  const dir = r.status === 0 ? r.stdout.trim() : ''
+  const dir = npmGlobalPrefix()
   if (!dir) {
-    console.error(`拿不到 npm 全局目录（npm prefix -g 失败：${(r.stderr || r.error?.message || '').trim()}）。用 --dir 指定一个在 PATH 上的目录。`)
+    console.error('拿不到 npm 全局目录（npm_config_prefix、npm config get prefix 都没有结果）。用 --dir 指定一个在 PATH 上的目录。')
     process.exit(1)
   }
   return dir // Windows 上全局 bin 就是 prefix 本身

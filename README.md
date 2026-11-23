@@ -151,7 +151,7 @@ node bin/install.mjs
 装到哪：
 
 - Linux / macOS：`/usr/local/bin/team-claude`；不可写时装到 `~/.local/bin`，那里不在 `PATH` 上会提示怎么加。
-- Windows：npm 全局 bin 目录（`npm prefix -g`）下的 `team-claude.cmd`（cmd、PowerShell 用）和 `team-claude`（Git Bash 用）。`claude` 先找 `claude.exe`（原生安装），再找 `claude.cmd`（npm 安装）。
+- Windows：npm 全局 bin 目录（环境变量 `npm_config_prefix`，否则 `npm config get prefix`；不解析 `npm prefix -g` 的输出，新版 npm 会把路径里像 UUID 的段打成 `***`）下的 `team-claude.cmd`（cmd、PowerShell 用）和 `team-claude`（Git Bash 用）。`claude` 先找 `claude.exe`（原生安装），再找 `claude.cmd`（npm 安装）。
 - `--config <配置文件>` 把配置路径写进装出的脚本，配置不在默认位置时用。不带时取装的那一刻环境里的 `FEISHU_CHANNEL_CONFIG`，都没有就不写。文件不存在就不装，装完打印「配置：<路径>」。
 - `--dir <目录>` 装到指定目录。重复跑就是覆盖成指向当前这份仓库；目标位置已有别的程序装的 `team-claude` 时不覆盖，确认要换加 `--force`。
 
