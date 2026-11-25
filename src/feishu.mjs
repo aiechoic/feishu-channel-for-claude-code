@@ -70,6 +70,21 @@ const ok = r => {
   return r?.data
 }
 
+/**
+ * 置顶里哪些是本机器人的：置顶人就是本机器人（app id），或者消息是本机器人发的卡片。keep 那条不算。
+ * senderOf(id) 查消息的发送者 { id, sender_type, msg_type }，查不到返回 null。
+ */
+export async function ownPins(pins, appId, keep, senderOf) {
+  const out = []
+  for (const p of pins) {
+    if (!p?.message_id || p.message_id === keep) continue
+    if (p.operator_id === appId) { out.push(p.message_id); continue }
+    const m = await senderOf(p.message_id).catch(() => null)
+    if (m?.sender_type === 'app' && m.id === appId && m.msg_type === 'interactive') out.push(p.message_id)
+  }
+  return out
+}
+
 export function connect(cfg, log) {
   const base = {
     appId: cfg.appId,
@@ -130,6 +145,19 @@ export function connect(cfg, log) {
     },
     async patchCard(id, content) {
       ok(await client.im.message.patch({ path: { message_id: id }, data: { content } }))
+    },
+    /** 取消本机器人在群里的旧置顶（keep 那条留着），不靠本机记的卡片 id；返回取消了的 message_id */
+    async unpinOwn(chat, keep) {
+      const pins = []
+      for await (const page of await client.im.pin.listWithIterator({ params: { chat_id: chat, page_size: 50 } })) pins.push(...(page?.items ?? []))
+      const senderOf = async id => {
+        const data = ok(await client.im.message.get({ path: { message_id: id } }))
+        const m = data?.items?.[0]
+        return m ? { id: m.sender?.id ?? '', sender_type: m.sender?.sender_type ?? '', msg_type: m.msg_type } : null
+      }
+      const mine = await ownPins(pins, cfg.appId, keep, senderOf)
+      for (const id of mine) ok(await client.im.pin.delete({ path: { message_id: id } }))
+      return mine
     },
     async pin(id) {
       ok(await client.im.pin.create({ data: { message_id: id } }))

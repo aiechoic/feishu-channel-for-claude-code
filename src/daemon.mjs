@@ -166,6 +166,11 @@ function refreshCard() {
       }
       S.card = await feishu.sendCard(cfg.statusChat, content)
       save()
+      // 旧卡片的置顶先取消（换了机器、状态目录丢了时本机没有记录），群里只留一张；失败不挡新卡片置顶
+      try {
+        const gone = await feishu.unpinOwn(cfg.statusChat, S.card)
+        if (gone.length) log(`取消旧置顶 ${gone.join(' ')}`)
+      } catch (e) { log(`取消旧置顶失败：${e.message}`) }
       await feishu.pin(S.card)
     }, () => { // 下次检查时重发，不让卡片停在旧状态
       cardShown = ''

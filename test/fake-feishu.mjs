@@ -47,6 +47,13 @@ export function connect() {
     },
     patchCard: async (id, content) => appendFileSync(`${dir}/card.txt`, `patch ${brief(content)}\n`),
     pin: async () => appendFileSync(`${dir}/card.txt`, 'pin\n'),
+    async unpinOwn(chat, keep) {
+      if (existsSync(`${dir}/unpin-fails`)) throw new Error('无权限')
+      const old = existsSync(`${dir}/pins.json`) ? JSON.parse(readFileSync(`${dir}/pins.json`, 'utf8')) : []
+      const gone = old.filter(id => id !== keep)
+      appendFileSync(`${dir}/card.txt`, `unpin ${chat} ${gone.join(',')}\n`)
+      return gone
+    },
     listen(h) {
       appendFileSync(`${dir}/consume.log`, 'start\n')
       h.onConnected()

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { formatContent, fromEvent, withRetry } from '../src/feishu.mjs'
+import { formatContent, fromEvent, ownPins, withRetry } from '../src/feishu.mjs'
 
 test('网络错误重试，飞书业务错误不重试', async () => {
   let n = 0
@@ -37,4 +37,24 @@ test('事件转消息：内容和列表接口走同一套格式，发送者只�
   assert.equal(ev('file', { file_key: 'f_1', file_name: 'a.txt' }, bot).content, '<file key="f_1" name="a.txt"/>')
   assert.equal(ev('post', { title: '标题', content: [[{ tag: 'text', text: '正文' }]] }, bot).content, '标题\n正文')
   assert.equal(ev('text', { text: 'x' }, undefined).sender.id, '')
+})
+
+test('ownPins：置顶人是本机器人，或本机器人发的卡片；keep 不算，别人的不动', async () => {
+  const senders = {
+    om_a: { id: 'cli_me', sender_type: 'app', msg_type: 'interactive' },
+    om_b: { id: 'cli_other', sender_type: 'app', msg_type: 'interactive' },
+    om_c: { id: 'cli_me', sender_type: 'app', msg_type: 'text' },
+    om_d: { id: 'ou_user', sender_type: 'user', msg_type: 'interactive' },
+  }
+  const senderOf = async id => { if (id === 'om_err') throw new Error('x'); return senders[id] ?? null }
+  const pins = [
+    { message_id: 'om_new', operator_id: 'cli_me' },
+    { message_id: 'om_byme', operator_id: 'cli_me' },
+    { message_id: 'om_a', operator_id: 'ou_user' },
+    { message_id: 'om_b', operator_id: 'ou_user' },
+    { message_id: 'om_c', operator_id: 'ou_user' },
+    { message_id: 'om_d', operator_id: 'ou_user' },
+    { message_id: 'om_err', operator_id: 'ou_user' },
+  ]
+  assert.deepEqual(await ownPins(pins, 'cli_me', 'om_new', senderOf), ['om_byme', 'om_a'])
 })

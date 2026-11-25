@@ -609,7 +609,7 @@ test('未读里的消息撤回：移出未读，不再读到', async () => {
 })
 
 test('状态卡片只发一次、置顶一次，状态变了才更新', () => rig(async r => {
-  await until(() => r.file('card.txt').includes('pin'), '置顶')
+  await until(() => r.file('card.txt').includes('\npin'), '置顶')
   r.hook('UserPromptSubmit')
   await until(() => r.file('card.txt').includes('patch 忙'), '更新')
   const n = r.file('card.txt').split('\n').length
@@ -1132,3 +1132,29 @@ test('只送达：没配 observe 时群里和私信里白名单外的照丢', ()
   await sleep(200)
   assert.equal(r.pushes.length, 0)
 }, { recallPollSec: 0 }))
+
+test('新状态卡片置顶前，先取消本机器人在该群的旧置顶（本机没有记录也取消）', async () => {
+  const r = new Rig()
+  writeFileSync(join(r.dir, 'pins.json'), JSON.stringify(['om_old_card', 'om_card']))
+  try {
+    await r.startDaemon()
+    await r.bridge()
+    await until(() => /\npin\n/.test(r.file('card.txt')), '置顶')
+    const lines = r.file('card.txt').trim().split('\n')
+    const u = lines.findIndex(l => l.startsWith('unpin'))
+    assert.equal(lines[u], 'unpin oc_group om_old_card', '新卡片自己不取消')
+    assert.ok(u < lines.indexOf('pin'), '先取消再置顶')
+    assert.match(r.log(), /取消旧置顶 om_old_card/)
+  } finally { r.close() }
+})
+
+test('取消旧置顶失败不挡新卡片置顶', async () => {
+  const r = new Rig()
+  writeFileSync(join(r.dir, 'unpin-fails'), '')
+  try {
+    await r.startDaemon()
+    await r.bridge()
+    await until(() => /\npin\n/.test(r.file('card.txt')), '置顶')
+    assert.match(r.log(), /取消旧置顶失败：无权限/)
+  } finally { r.close() }
+})
