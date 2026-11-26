@@ -43,7 +43,7 @@ node src/codex.mjs /path/to/config.json
 - 「停」与处理中撤回通过停止标记触发原生 `turn/interrupt`，并清理当前 turn 的命令进程树。已返回 session_id 但没有退出码的命令仍保留为目标。共享 daemon 下按本 thread 的命令事件、启动时间与完整脚本匹配；只有唯一匹配且启动身份复核一致时才杀，不按“最新 PowerShell”猜目标。独立 app-server 的子进程同样走这条检查。无法识别或匹配有歧义时只中断 turn，不猜测进程归属。
 - 停止确认接受 RPC 响应或匹配的 `turn/completed` 事件；完成事件已确认目标轮次结束时，迟到的中断 RPC 超时不会关闭接收端。Windows 实测停止后约 45 秒仍能收到新消息并自动唤醒。
 - 没有实现执行前同步拒绝每次工具调用的 Codex PreToolUse 门禁；停止期间的工具开始事件触发再次清理和中断，属于补偿措施。Windows 清理使用 taskkill /T /F；Linux 使用现有 proc.killTree。Linux 的真实 Codex 命令包装格式尚需单独验收。
-- Q497 联测：心跳只发送独立 ID 的 PostToolUse，不伪造 Pre，不删除其他待完成工具。同轮 steer 不发送会清空待完成工具的 UserPromptSubmit；turn/completed 发送 Stop，即使没有 item/completed 也清理等待状态和命令归属记录。
+- 联测：心跳只发送独立 ID 的 PostToolUse，不伪造 Pre，不删除其他待完成工具。同轮 steer 不发送会清空待完成工具的 UserPromptSubmit；turn/completed 发送 Stop，即使没有 item/completed 也清理等待状态和命令归属记录。
 - 接收端退出后常驻进程仍保存队列、定时；重新运行接收端恢复会话。daemon 被杀后仍由原有 supervise 拉起，`bin/restart.mjs` 用法不变。接收端自己不自动重启，避免 RPC 超时但实际已接受时静默重复执行。
 - Codex 压缩期间明确返回 `cannot steer a compact turn` 时，接收端保持连接，不确认该批消息，优先等待目标轮次完成事件后重新读取轮次和历史；未收到事件时每五秒兜底重试；压缩结束后按当前状态补充到活动轮次或开启新轮次。历史中的投递标记和固定消息 ID 用于去重；停止期间等待轮次结束。仅投递 RPC 在途时暂存 hook，压缩等待阶段继续上报心跳和忙闲状态。RPC 超时等结果不明的错误仍保留队列并退出，避免静默重复执行。
 - 已确认投递的内容摘要落盘，重试时去重；读到历史中相同投递标记也跳过。RPC 响应不明时接收端退出并保留 daemon 队列，操作者应核对会话再恢复，不能承诺跨进程崩溃窗口的严格 exactly-once。
@@ -371,7 +371,7 @@ print(f'本机领先 {lo:.3f}..{hi:.3f} 秒')
 npm test
 ```
 
-用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。企业微信用 `test/fake-wecom-server.mjs`：本地的假长连接服务（按官方 SDK 的帧格式回认证、心跳、主动推送回执，能推消息、踢连接、断网）加一个放加密附件的 HTTP 服务，测试里跑的是真 SDK 和真常驻进程。GitHub Actions 在 ubuntu 和 windows 上各跑一遍。「停」杀真实 bash 子进程那条只在 Linux / macOS 跑；Windows 的查表和杀树由 `test/proc.test.mjs` 用模拟的 PowerShell 输出覆盖。
+用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。企业微信用 `test/fake-wecom-server.mjs`：本地的假长连接服务（按官方 SDK 的帧格式回认证、心跳、主动推送回执，能推消息、踢连接、断网）加一个放加密附件的 HTTP 服务，测试里跑的是真 SDK 和真常驻进程。「停」杀真实 bash 子进程那条只在 Linux / macOS 跑；Windows 的查表和杀树由 `test/proc.test.mjs` 用模拟的 PowerShell 输出覆盖。
 
 Codex 集成测试直接持有真实 daemon，用子进程专用的 `test/owned-daemon.mjs` 预载接管 receiver 和 MCP bridge 的 supervise 自动启动，不起 detached supervise。测试记录各子进程 PID，关闭后断言全部退出再删临时目录；此预载不用于实际接收端。
 

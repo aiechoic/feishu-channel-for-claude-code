@@ -19,7 +19,7 @@
  * Secret 只从 botSecretFile 读，不写日志。
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { basename, extname, join } from 'node:path'
+import { extname, join } from 'node:path'
 import { WSClient as SdkClient } from '@wecom/aibot-node-sdk'
 import { paths } from './common.mjs'
 import { PLATFORMS } from './platform.mjs'
@@ -37,7 +37,7 @@ export const toMs = t => {
   return n < 1e12 ? n * 1000 : n
 }
 
-/** 按文件头猜图片扩展名（回调里没有图片的文件名） */
+/** 按文件头认图片格式，认不出给 .img */
 function imageExt(buf) {
   if (buf.length >= 8 && buf.readUInt32BE(0) === 0x89504e47) return '.png'
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg'
@@ -46,9 +46,21 @@ function imageExt(buf) {
   return '.img'
 }
 
-/** 落盘用的文件名：只留最后一段，去掉控制字符和路径分隔符，空了用 fallback */
+/**
+ * 图片的扩展名按内容定：下载给的文件名可能是 xxx_compress.png、内容却是 JPEG。
+ * 内容认不出时保留原扩展名，没有扩展名就补 .img；.jpeg 和 JPEG 内容算一致。
+ */
+export function withImageExt(name, real) {
+  const ext = extname(name)
+  if (real === '.img') return ext ? name : `${name}.img`
+  const low = ext.toLowerCase()
+  if (low === real || (real === '.jpg' && low === '.jpeg')) return name
+  return `${ext ? name.slice(0, -ext.length) : name}${real}`
+}
+
+/** 落盘用的文件名：只留最后一段（只按 / 和 \ 切，不认盘符），去掉控制字符和路径分隔符，空了用 fallback */
 export function safeName(name, fallback) {
-  const s = basename(String(name ?? '')).replace(/[\u0000-\u001f\\/:*?"<>|]/g, '_').trim()
+  const s = String(name ?? '').split(/[\\/]/).pop().replace(/[\u0000-\u001f\\/:*?"<>|]/g, '_').trim()
   return s && s !== '.' && s !== '..' ? s.slice(0, 120) : fallback
 }
 
@@ -83,10 +95,9 @@ export function connect(cfg, log, deps = {}) {
   async function save(msgid, i, item, kind) {
     const { buffer, filename } = await client.downloadFile(item.url, item.aeskey)
     mkdirSync(mediaDir, { recursive: true })
-    const fallback = `${kind}${kind === 'image' ? imageExt(buffer) : ''}`
-    const name = safeName(filename ?? item.filename ?? item.name, fallback)
-    const ext = extname(name) || (kind === 'image' ? imageExt(buffer) : '')
-    const file = join(mediaDir, `${safeName(msgid, 'msg')}-${i}-${name.endsWith(ext) ? name : `${name}${ext}`}`)
+    const given = safeName(filename ?? item.filename ?? item.name, kind)
+    const name = kind === 'image' ? withImageExt(given, imageExt(buffer)) : given
+    const file = join(mediaDir, `${safeName(msgid, 'msg')}-${i}-${name}`)
     writeFileSync(file, buffer)
     return { file, name }
   }

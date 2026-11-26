@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { test } from 'node:test'
-import { connect, safeName, toMs } from '../src/wecom.mjs'
+import { connect, safeName, toMs, withImageExt } from '../src/wecom.mjs'
 import { startFake, textMsg } from './fake-wecom-server.mjs'
 
 async function until(cond, what) {
@@ -73,7 +73,7 @@ test('企业微信适配器：单聊文字、语音转文字、引用照收；�
   } finally { s.done() }
 })
 
-test('企业微信适配器：图片、文件、图文混排下载解密后落盘，正文给本地路径；下载失败也给一行', async () => {
+test('企业微信适配器：图片、文件、图文混排下载解密后落盘，正文给本地路径；图片扩展名按内容；下载失败也给一行', async () => {
   const s = await setup()
   try {
     await until(() => s.got.connected === 1, '认证')
@@ -83,7 +83,10 @@ test('企业微信适配器：图片、文件、图文混排下载解密后落�
     s.fake.push({ ...textMsg('mix1', 'alice'), msgtype: 'mixed', text: undefined, mixed: { msg_item: [{ msgtype: 'text', text: { content: '看图' } }, { msgtype: 'image', image: s.fake.file(png) }] } })
     s.fake.push({ ...textMsg('bad1', 'alice'), msgtype: 'image', image: { url: `${s.fake.file('x').url}-missing`, aeskey: 'AAAA' }, text: undefined })
     s.fake.push({ ...textMsg('vid1', 'alice'), msgtype: 'video', video: { url: 'http://127.0.0.1:1/v', aeskey: 'AAAA' }, text: undefined })
-    await until(() => s.got.messages.length === 5, '五条')
+    // 「图片」入口发的压缩图：下载给的名字是 .png，内容是 JPEG
+    const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1]), Buffer.from('jpeg body')])
+    s.fake.push({ ...textMsg('img2', 'alice'), msgtype: 'image', image: s.fake.file(jpg, '06ad41c9_compress.png'), text: undefined })
+    await until(() => s.got.messages.length === 6, '六条')
     const by = Object.fromEntries(s.got.messages.map(e => [e.message.message_id, e.message]))
     const img = /^\[图片\] (.+)$/.exec(by.img1.content)?.[1]
     assert.ok(img?.endsWith('.png'), by.img1.content)
@@ -97,6 +100,9 @@ test('企业微信适配器：图片、文件、图文混排下载解密后落�
     assert.deepEqual(readFileSync(/^\[图片\] (.+)$/.exec(m)[1]), png)
     assert.match(by.bad1.content, /^\[图片下载失败：/)
     assert.equal(by.vid1.content, '[视频] 暂不支持下载')
+    const img2 = /^\[图片\] (.+)$/.exec(by.img2.content)?.[1]
+    assert.ok(img2?.endsWith('-0-06ad41c9_compress.jpg'), by.img2.content)
+    assert.deepEqual(readFileSync(img2), jpg)
   } finally { s.done() }
 })
 
@@ -157,11 +163,18 @@ test('企业微信适配器：Secret 错了重试几次后报 onFatal；Secret �
   }
 })
 
-test('企业微信适配器：文件名去掉路径和非法字符；时间戳秒、毫秒都认', () => {
+test('企业微信适配器：文件名去掉路径和非法字符；图片扩展名按内容定；时间戳秒、毫秒都认', () => {
   assert.equal(safeName('../../etc/passwd', 'f'), 'passwd')
   assert.equal(safeName('a:b*c?.txt', 'f'), 'a_b_c_.txt')
   assert.equal(safeName('', 'f'), 'f')
   assert.equal(safeName('..', 'f'), 'f')
+  assert.equal(safeName('C:\\tmp\\x.txt', 'f'), 'x.txt')
+  assert.equal(withImageExt('a_compress.png', '.jpg'), 'a_compress.jpg')
+  assert.equal(withImageExt('a.JPEG', '.jpg'), 'a.JPEG')
+  assert.equal(withImageExt('a.png', '.png'), 'a.png')
+  assert.equal(withImageExt('image', '.gif'), 'image.gif')
+  assert.equal(withImageExt('a.png', '.img'), 'a.png')
+  assert.equal(withImageExt('image', '.img'), 'image.img')
   assert.equal(toMs(1_700_000_000), 1_700_000_000_000)
   assert.equal(toMs(1_700_000_000_123), 1_700_000_000_123)
   assert.ok(Math.abs(toMs(undefined) - Date.now()) < 1000)
