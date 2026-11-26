@@ -1,0 +1,7 @@
+{
+  "platform": "wecom",
+  "botId": "your_bot_id",
+  "botSecretFile": "/path/to/bot-secret",
+  "allow": ["your_userid"],
+  "observe": { "dms": true }
+}

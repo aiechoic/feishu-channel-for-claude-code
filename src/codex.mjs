@@ -10,8 +10,13 @@ import { CodexRpc } from './codex-rpc.mjs'
 import { CodexSession } from './codex-session.mjs'
 import { CodexCommands } from './codex-proc.mjs'
 import proc from './proc.mjs'
+import { platformOf } from './platform.mjs'
 
 const cfg = readConfig()
+if (!platformOf(cfg).codex) {
+  console.error(`Codex 接入目前只支持飞书，这份配置是 ${platformOf(cfg).label}`)
+  process.exit(2)
+}
 const P = paths(cfg)
 mkdirSync(P.dir, { recursive: true })
 const sessionFile = join(P.dir, `${cfg.appId}-codex.json`)

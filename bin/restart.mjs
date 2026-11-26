@@ -3,11 +3,12 @@
  * 重启常驻进程：node bin/restart.mjs [配置文件]
  *
  * 只杀本配置（同一个状态目录）的常驻进程，不动外层循环；外层循环 2 秒后把它重新拉起。
- * 认人靠常驻进程启动时写的 <appId>.pid（pid + 启动时刻）：两者都和进程表对得上才杀，防 pid 被复用后杀错。
+ * 认人靠常驻进程启动时写的 <账号>.pid（pid + 启动时刻）：两者都和进程表对得上才杀，防 pid 被复用后杀错。
  * 杀完等新的常驻进程把自己的 pid 写进来（最多 15 秒），打印新旧 pid。
+ * 长连接被另一处接管过（<状态名>.kicked 在）时先删掉这个标记，重启后本机重新连上。
  * 退出码：0 重启成功；1 没在跑（pid 文件不在或对不上），什么都没杀；2 杀了但等不到新的。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { paths, readConfig } from '../src/common.mjs'
 import proc from '../src/proc.mjs'
@@ -27,6 +28,12 @@ function current() {
 
 /** pid 文件里的进程还活着、而且就是写文件的那个 */
 const alive = r => r !== null && proc.start(r.pid) === r.start
+
+// 长连接被另一处接管后留的标记：重启就是要在本机拿回来，删掉它（另一处还在跑的话会被踢下线）
+if (existsSync(P.kicked)) {
+  rmSync(P.kicked, { force: true })
+  console.log(`已删除 ${P.kicked}：本机会重新连上长连接，另一处要是还在跑会被踢下线`)
+}
 
 const old = current()
 if (!old) {

@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { HERE } from './common.mjs'
+import { platformOf } from './platform.mjs'
 
 /** 默认配置文件位置（Windows 上 homedir() 就是 %USERPROFILE%） */
 export const defaultConfigFile = () => join(homedir(), '.config', 'feishu-channel', 'config.json')
@@ -38,17 +39,32 @@ export const SOURCE_LABEL = { env: '环境变量', workdir: '工作目录', inst
 // 路径一律用正斜杠加双引号：sh、cmd、PowerShell 都认，Node 在 Windows 上也认正斜杠。
 const q = p => JSON.stringify(p.replaceAll('\\', '/'))
 
-/** 配置目录里该有的 mcp.json、settings.json 内容（指向本仓库的 bridge.mjs、hook.mjs） */
+/** 配置文件写的平台；文件读不出来时按飞书（setup 先于配置存在时也能打印命令），写了不认识的平台照样报错 */
+function platformOfFile(cfgFile) {
+  let cfg = {}
+  try {
+    cfg = JSON.parse(readFileSync(cfgFile, 'utf8'))
+  } catch {}
+  return platformOf(cfg)
+}
+
+/**
+ * 配置目录里该有的 mcp.json、settings.json 内容（指向本仓库的 bridge.mjs、hook.mjs）。
+ * MCP server 按平台起名（feishu / wecom）；飞书以外的平台文件名带平台前缀，两份配置放在同一个目录也不互相覆盖。
+ */
 export function claudeFiles(cfgFile) {
   const dir = dirname(cfgFile)
+  const p = platformOfFile(cfgFile)
+  const pre = p.name === 'feishu' ? '' : `${p.name}-`
   // hook 命令：配置文件当参数传，不写 `VAR=… node` 这种只有 sh 认的前缀 —— Windows 上 hook 不一定由 sh 执行。
   const hook = { type: 'command', command: `node ${q(join(HERE, 'hook.mjs'))} ${q(cfgFile)}`, timeout: 5 }
   const plain = [{ hooks: [hook] }]
   const tools = [{ matcher: '*', hooks: [hook] }]
   return {
-    mcpFile: join(dir, 'mcp.json'),
-    settingsFile: join(dir, 'settings.json'),
-    mcp: { mcpServers: { feishu: { command: 'node', args: [join(HERE, 'bridge.mjs')], env: { FEISHU_CHANNEL_CONFIG: cfgFile } } } },
+    server: p.name,
+    mcpFile: join(dir, `${pre}mcp.json`),
+    settingsFile: join(dir, `${pre}settings.json`),
+    mcp: { mcpServers: { [p.name]: { command: 'node', args: [join(HERE, 'bridge.mjs')], env: { FEISHU_CHANNEL_CONFIG: cfgFile } } } },
     settings: { hooks: { UserPromptSubmit: plain, Stop: plain, PreToolUse: tools, PostToolUse: tools, PostToolUseFailure: tools } },
   }
 }
@@ -79,13 +95,13 @@ export function writeClaudeFiles(cfgFile, { onlyIfStale = false } = {}) {
 /** 接上 channel 的 claude 参数（不含会话相关的） */
 export function channelArgs(cfgFile) {
   const f = claudeFiles(cfgFile)
-  return ['--mcp-config', f.mcpFile, '--settings', f.settingsFile, '--dangerously-load-development-channels', 'server:feishu']
+  return ['--mcp-config', f.mcpFile, '--settings', f.settingsFile, '--dangerously-load-development-channels', `server:${f.server}`]
 }
 
 /** 给人看的启动命令（setup.mjs 打印） */
 export function channelCommand(cfgFile) {
   const f = claudeFiles(cfgFile)
-  return `claude --mcp-config ${q(f.mcpFile)} --settings ${q(f.settingsFile)} --dangerously-load-development-channels server:feishu`
+  return `claude --mcp-config ${q(f.mcpFile)} --settings ${q(f.settingsFile)} --dangerously-load-development-channels server:${f.server}`
 }
 
 /**

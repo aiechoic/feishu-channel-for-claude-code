@@ -4,6 +4,8 @@ Bring Feishu / Lark chats into a running Claude Code session through Claude Code
 
 把飞书的群和私信送进运行中的 Claude Code 会话：有消息才唤醒，忙时补充立刻送进这一轮，能远程喊停，飞书里看得到状态，还能定时唤醒。
 
+也支持企业微信（智能机器人的长连接，单聊），见「企业微信」。
+
 ## Codex
 
 需要 Codex CLI 的 app-server 接口。Windows 本机验证使用 CLI 0.166.0、共享 daemon 0.167.0；真实飞书忙时送达、MCP 回复、闲时唤醒、两分钟一次性定时，以及「停」中断当前轮次并杀掉等待命令均通过。同父进程下另一条 PowerShell 保持存活的真实进程用例也通过。模拟飞书和模拟 Codex 的联调覆盖收消息、忙时补充、合并、停、撤回、MCP 回复、定时和会话恢复。
@@ -55,6 +57,60 @@ node src/codex.mjs /path/to/config.json
 - exec 回退只支持不含变量展开、管道、重定向或其他控制运算符的末尾简单命令。缺少可读取的线程标识、复杂脚本或匹配有歧义时不猜测目标，输出明确的未清理日志，并保留原生轮次中断。
 - 本适配支持 Linux 与 Windows；macOS 没有当前实现所需的 /proc 进程归属读取，不在支持范围，真实进程清理测试在该平台明确跳过。Linux 真实进程测试通过不等于已验证真实 Linux Codex 会话的全部命令包装形式。
 
+## 企业微信
+
+用企业微信的**智能机器人**（API 模式 + 长连接）：常驻进程用官方 SDK `@wecom/aibot-node-sdk` 连 `wss://openws.work.weixin.qq.com`，不要公网地址，不用配消息加解密。目前只做**成员和机器人单聊**；群里 @ 机器人的消息记日志后丢掉。
+
+### 建机器人
+
+在企业微信客户端「工作台 → 智能机器人 → 创建机器人 → 手动创建」，选「API 模式」，连接方式选「使用长连接」，可见范围选要用它的成员，保存后页面上有 Bot ID 和 Secret。
+
+- 谁能建：超级管理员和被授权的成员（成员的创建权限默认全员开放，管理员可以收窄）。1000 人以上的企业默认没人能配长连接，要管理员在「管理后台 → 智能专区 → 智能机器人 → 权限管理 → API 模式管理」里给权限。
+- **建议超级管理员来建**：创建者是超级管理员时，消息里的发送者是明文 userid（通讯录里的账号）；否则是加密的 userid，白名单要填加密后的那个（在日志 `事件到达 … 发送者 …` 里看）。
+- 成员在通讯录的「智能机器人」分组里找到它，直接发消息。
+
+### 配置
+
+照 `config.example.wecom.json` 建一份，放在和飞书不同的位置（比如另一个工作目录的 `.feishu-channel/config.json`，或用 `FEISHU_CHANNEL_CONFIG` 指过去），再 `node bin/setup.mjs`。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `platform` | 是 | `"wecom"`。不写是飞书；写了不认识的值，所有入口都直接报错退出 |
+| `botId` | 是 | 机器人的 Bot ID |
+| `botSecretFile` | 是 | 存 Secret 的文件，建议 `chmod 600`。Secret 只从这里读，不进日志 |
+| `allow` | 是 | 放行的成员 userid |
+| `observe` | 否 | 和飞书一样：`{ "dms": true }` 时白名单外的成员发的单聊也送进会话，标 `trust="external"`（只当数据，不接指令） |
+| `statusChat` | 否 | 定时消息所在的会话，填一个成员的 userid |
+| `names` | 否 | userid → 显示名。企业微信的消息里没有姓名 |
+| `wsUrl` | 否 | 长连接地址，默认 `wss://openws.work.weixin.qq.com`；私有部署的企业在管理端查 |
+| `reconnectBaseMs` | 否 | 断线重连的起始间隔（毫秒），默认 1000，按指数退避，最长 30 秒 |
+| `stateDir`、`timezone`、`busyTimeoutSec` 等 | 否 | 同飞书，见「配置」 |
+
+一台机器上同时跑飞书和企业微信两个 channel 时互不相撞：企业微信的状态文件按 `wecom-<botId>` 起名（飞书按 appId），Windows 命名管道是 `\\.\pipe\wecom-channel-<botId>-<状态目录哈希>`；MCP server 叫 `wecom`（工具是 `mcp__wecom__reply`，启动参数 `server:wecom`），两份配置放在同一个目录时 `setup` 生成的是 `wecom-mcp.json`、`wecom-settings.json`。
+
+### 和飞书的差别
+
+| | 企业微信 |
+| --- | --- |
+| 收 | 文字原样；语音是企业微信转好的文字；图片、文件下载解密后存到 `<stateDir>/wecom-<botId>-media/`，正文给本地路径（下载地址 5 分钟就过期，收到就下）；图文混排逐段给；引用的那条只给文字摘要；视频只有占位 |
+| 回 | `reply` 走主动推送（`aibot_send_msg`），按 markdown 显示。对方要先给机器人发过消息才推得出去 |
+| 状态卡片、置顶、回执表情 | 没有（企业微信没有对应能力），能力表里关掉 |
+| 补拉未读、`read_unread` | 没有：企业微信没有拉历史消息的接口。只靠长连接实时收，断线期间的消息收不到 |
+| 撤回 | 收不到撤回 |
+| 「停」、忙闲、合并送达、定时、`observe` | 和飞书一样 |
+| 自检 | 没有查权限的接口；`node bin/doctor.mjs` 只看 `botSecretFile` 在不在。Secret 错了，常驻进程重试几次后以退出码 78 退出，外层循环 5 分钟后再拉 |
+| Codex | 不支持（`setup --codex` 和 `codex.mjs` 都会报错） |
+
+### 一个机器人只能有一条长连接
+
+同一个机器人同一时间只能有一条有效长连接，别处（另一台机器、另一份状态目录）用同一个 Bot ID 连上时，本机会被踢下线。这时常驻进程：
+
+- 不重连（重连会把对方踢掉，两边来回抢），日志写「长连接被另一处接管」，在状态目录留下 `wecom-<botId>.kicked`；
+- 不退出（退出会被外层循环拉起来再抢），`reply` 返回错误，并往会话里送一条说明；
+- 之后重启也不连，直到有人跑 `node bin/restart.mjs`：它先删掉这个标记再重启，本机重新连上（另一处还在跑的话会被踢下线）。
+
+网络断了（没有被踢）时由 SDK 自动重连，不用管。
+
 ## 风险：先读这一段
 
 - 依赖 Claude Code 的研究预览功能 Channels，协议和参数都可能变动。
@@ -70,7 +126,9 @@ node src/codex.mjs /path/to/config.json
 | `src/bridge.mjs` | MCP 桥（stdio）：只转发，启动时确保外层循环在跑 |
 | `src/tools.mjs` | MCP 工具的定义和执行，由常驻进程加载；桥连上常驻进程后从它取列表 |
 | `src/hook.mjs` | Claude Code hook：上报忙闲和工具名，看到停止标记时结束这一轮 |
+| `src/platform.mjs` | 平台表：配置里 `platform` 选哪个 IM，各自的账号字段、MCP 名字、会话 id 格式、给模型的说明 |
 | `src/feishu.mjs` | 飞书适配器，基于官方 Node SDK |
+| `src/wecom.mjs` | 企业微信适配器，基于官方智能机器人 Node SDK；开头写着适配器接口 |
 | `bin/restart.mjs` | 重启常驻进程：凭 pid 文件认准再杀，等外层循环拉起新的 |
 | `bin/start.mjs`、`bin/install.mjs` | `team-claude` 命令本身和它的安装，见「统一启动」 |
 | `src/claude-launch.mjs` | `mcp.json`、`settings.json` 的内容和 `claude` 的启动参数，`setup.mjs` 和 `start.mjs` 共用 |
@@ -313,7 +371,7 @@ print(f'本机领先 {lo:.3f}..{hi:.3f} 秒')
 npm test
 ```
 
-用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。GitHub Actions 在 ubuntu 和 windows 上各跑一遍。「停」杀真实 bash 子进程那条只在 Linux / macOS 跑；Windows 的查表和杀树由 `test/proc.test.mjs` 用模拟的 PowerShell 输出覆盖。
+用 `test/fake-feishu.mjs` 代替飞书，不需要凭据。企业微信用 `test/fake-wecom-server.mjs`：本地的假长连接服务（按官方 SDK 的帧格式回认证、心跳、主动推送回执，能推消息、踢连接、断网）加一个放加密附件的 HTTP 服务，测试里跑的是真 SDK 和真常驻进程。GitHub Actions 在 ubuntu 和 windows 上各跑一遍。「停」杀真实 bash 子进程那条只在 Linux / macOS 跑；Windows 的查表和杀树由 `test/proc.test.mjs` 用模拟的 PowerShell 输出覆盖。
 
 Codex 集成测试直接持有真实 daemon，用子进程专用的 `test/owned-daemon.mjs` 预载接管 receiver 和 MCP bridge 的 supervise 自动启动，不起 detached supervise。测试记录各子进程 PID，关闭后断言全部退出再删临时目录；此预载不用于实际接收端。
 

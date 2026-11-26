@@ -1,7 +1,8 @@
-// 飞书适配器：只用官方 Node SDK。daemon 只依赖这里导出的接口，测试用 FEISHU_ADAPTER 换成假实现。
+// 飞书适配器：只用官方 Node SDK。daemon 只依赖这里导出的接口（接口说明见 wecom.mjs 开头），测试用 CHANNEL_ADAPTER / FEISHU_ADAPTER 换成假实现。
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import * as lark from '@larksuiteoapi/node-sdk'
+import { PLATFORMS } from './platform.mjs'
 
 const secret = cfg => process.env.FEISHU_APP_SECRET
   ?? (cfg.appSecretFile ? readFileSync(cfg.appSecretFile, 'utf8').trim() : cfg.appSecret)
@@ -94,6 +95,10 @@ export function connect(cfg, log) {
   }
   const client = new lark.Client(base)
   return {
+    platform: 'feishu',
+    /** 飞书什么都有：卡片、表情、补拉、撤回、查权限 */
+    caps: { card: true, reaction: true, history: true, recall: true, scopes: true },
+    isChatId: PLATFORMS.feishu.isChatId,
     async grantedScopes() {
       const data = ok(await client.request({ method: 'GET', url: '/open-apis/application/v6/scopes' }))
       return (data.scopes ?? []).filter(s => s.grant_status === 1).map(s => s.scope_name)

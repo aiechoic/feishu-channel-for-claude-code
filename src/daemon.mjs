@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 飞书 channel 常驻进程：持有事件长连接、已读记录、消息队列、定时和忙闲状态，由 supervise.mjs 负责重启。
+ * channel 常驻进程：持有事件长连接、已读记录、消息队列、定时和忙闲状态，由 supervise.mjs 负责重启。
  *
  * 收：长连接事件带的内容直接入队；启动 / 连上时和定时全量补漏只补漏。以已读记录为准，不漏不重。
  * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
@@ -19,7 +19,8 @@
  * 撤回：im.message.recalled_v1 事件，低频轮询兜底。排队中的撤下；正在处理的打断这一轮；已处理完的只作废。都不暂停定时。
  * 定时：到点进同一条队列；会话不在线时等上线补发，过了宽限期只回报跳过。
  *
- * 配置字段见 config.example.json。环境变量 FEISHU_CHANNEL_CONFIG 换配置文件，FEISHU_ADAPTER 换飞书适配器（测试用）。
+ * 配置字段见 config.example.json。环境变量 FEISHU_CHANNEL_CONFIG 换配置文件，CHANNEL_ADAPTER（旧名 FEISHU_ADAPTER）换适配器（测试用）。
+ * 平台（platform.mjs）：飞书全部功能都有；适配器在 caps 里声明没有的功能（企业微信没有卡片、表情、补拉、撤回），这里整段跳过。
  */
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
@@ -29,16 +30,26 @@ import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { paths, readConfig } from './common.mjs'
 import { checkScopes } from './doctor.mjs'
+import { accountId, platformOf } from './platform.mjs'
 import proc, { COMMAND_TOOLS, isCommandShell } from './proc.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
-import { callTool, TOOLS } from './tools.mjs'
+import { callTool, toolsFor } from './tools.mjs'
 
 const cfg = readConfig()
+const PLATFORM = platformOf(cfg)
 const P = paths(cfg)
 mkdirSync(P.dir, { recursive: true })
-// 适配器路径转成 file URL 再 import：Windows 的绝对路径（C:\…）直接 import 会被当成 URL 协议报错
-const adapter = process.env.FEISHU_ADAPTER ? pathToFileURL(process.env.FEISHU_ADAPTER).href : './feishu.mjs'
-const feishu = (await import(adapter)).connect(cfg, msg => log(msg))
+// 适配器：按平台选；测试用 CHANNEL_ADAPTER（或旧名 FEISHU_ADAPTER）换成假实现。
+// 路径转成 file URL 再 import：Windows 的绝对路径（C:\…）直接 import 会被当成 URL 协议报错
+const adapterFile = process.env.CHANNEL_ADAPTER ?? process.env.FEISHU_ADAPTER
+const adapter = adapterFile ? pathToFileURL(adapterFile).href : PLATFORM.adapter
+const im = (await import(adapter)).connect(cfg, msg => log(msg))
+/**
+ * 适配器支持哪些功能；没写的按有（飞书全有）。没有的整段跳过：
+ * card 状态卡片和置顶，reaction 回执表情，history 补拉（列会话、拉历史、按 id 取消息），recall 撤回，scopes 查权限
+ */
+const CAPS = { card: true, reaction: true, history: true, recall: true, scopes: true, ...im.caps }
+const TOOLS = toolsFor(PLATFORM)
 const ALLOW = new Set(cfg.allow)
 // observe: true 是机器人在的全部群和私信；写成 { chats, dms } 时只收这些
 const OBSERVE_ALL = cfg.observe === true
@@ -70,7 +81,7 @@ const TOOL_WAIT_MAX_MS = (cfg.toolWaitMaxSec ?? 86_400) * 1000
 const EMOJI = { queued: 'GLANCE', active: 'OneSecond', done: 'CheckMark', stopped: 'CrossMark' }
 
 function log(msg) {
-  const line = `[feishu] ${msg}`
+  const line = `[${PLATFORM.name}] ${msg}`
   console.error(line)
   try {
     appendFileSync(P.log, `${new Date().toISOString()} ${line}\n`)
@@ -119,14 +130,14 @@ const effect = (what, fn, onFail) => {
 }
 
 function react(id, kind) {
-  if (!id || S.reactions[id]?.kind === kind) return
+  if (!CAPS.reaction || !id || S.reactions[id]?.kind === kind) return
   S.reactions[id] = { kind, id: S.reactions[id]?.id ?? '' }
   effect(`表情 ${id}`, async () => {
     const old = S.reactions[id]?.id // 串行执行到这里时前一个表情的 id 才可用
     if (old) {
-      await feishu.removeReaction(id, old)
+      await im.removeReaction(id, old)
     }
-    const reactionId = await feishu.addReaction(id, EMOJI[kind])
+    const reactionId = await im.addReaction(id, EMOJI[kind])
     if (S.reactions[id]) S.reactions[id].id = reactionId
     save()
   })
@@ -153,7 +164,7 @@ const warnings = new Set()
 let cardShown = ''
 let cardTimer = null
 function refreshCard() {
-  if (!cfg.statusChat || cardTimer) return
+  if (!CAPS.card || !cfg.statusChat || cardTimer) return
   cardTimer = setTimeout(() => {
     cardTimer = null
     const content = JSON.stringify(cardBody())
@@ -161,17 +172,17 @@ function refreshCard() {
     cardShown = content
     effect('状态卡片', async () => {
       if (S.card) {
-        await feishu.patchCard(S.card, content)
+        await im.patchCard(S.card, content)
         return
       }
-      S.card = await feishu.sendCard(cfg.statusChat, content)
+      S.card = await im.sendCard(cfg.statusChat, content)
       save()
       // 旧卡片的置顶先取消（换了机器、状态目录丢了时本机没有记录），群里只留一张；失败不挡新卡片置顶
       try {
-        const gone = await feishu.unpinOwn(cfg.statusChat, S.card)
+        const gone = await im.unpinOwn(cfg.statusChat, S.card)
         if (gone.length) log(`取消旧置顶 ${gone.join(' ')}`)
       } catch (e) { log(`取消旧置顶失败：${e.message}`) }
-      await feishu.pin(S.card)
+      await im.pin(S.card)
     }, () => { // 下次检查时重发，不让卡片停在旧状态
       cardShown = ''
       setTimeout(refreshCard, CARD_RETRY_MS).unref()
@@ -328,7 +339,7 @@ function resumeWake() {
 }
 
 function clip(text) {
-  return text.length <= CLIP ? text : `${text.slice(0, CLIP)} …[已截断，全文按 message_id 用 lark-cli 拉]`
+  return text.length <= CLIP ? text : `${text.slice(0, CLIP)} …[已截断，${PLATFORM.fullTextHint}]`
 }
 
 /** 闲时：队首会话的排队（含说明、定时）合并送出，等 hook 确认唤醒；外部发送者的消息单独成一批，不和白名单的混。
@@ -363,7 +374,7 @@ function deliver() {
       chat_type: first.chat_type ?? 'group',
       message_id: ids.join(','),
       sender_id: first.sender_id ?? 'system',
-      sender_name: first.sender_name ?? '飞书 channel',
+      sender_name: first.sender_name ?? `${PLATFORM.label} channel`,
       sender_type: first.sender_type ?? 'system',
       msg_type: first.msg_type ?? 'text',
       create_time: first.create_time ?? '',
@@ -442,7 +453,10 @@ function enqueue(item) {
 
 // ---------- 停和撤回 ----------
 
-const send = (chat, text) => feishu.sendText(chat, text)
+const send = (chat, text) => {
+  if (kicked) return Promise.reject(new Error(KICKED_HINT))
+  return im.sendText(chat, text)
+}
 
 /** 写停止标记拦下工具调用，杀当前工具进程；返回杀了没有 */
 function interrupt(why) {
@@ -492,7 +506,7 @@ async function pollRecalls() {
   }
   const ids = [...S.queue.filter(m => !m.notice).map(m => m.message_id), ...Object.keys(S.delivered)]
   for (const id of ids) {
-    const m = await feishu.getMessage(id)
+    const m = await im.getMessage(id)
     if (m?.deleted) {
       log(`轮询发现撤回 ${id}`)
       onRecall(id)
@@ -572,7 +586,7 @@ async function unread(chat, since) {
   const rows = []
   let token
   for (let page = 0; page < MAX_PAGES; page++) {
-    const data = await feishu.listMessages(chat, token)
+    const data = await im.listMessages(chat, token)
     const fresh = data.messages.filter(m => !seen.has(m.message_id))
     rows.unshift(...fresh.reverse())
     if (fresh.length < data.messages.length || !data.hasMore || !data.pageToken || data.messages.some(m => m.create_ms < since)) return rows
@@ -638,7 +652,7 @@ async function chatName(chat, isGroup, latest) {
   if (S.chatNames?.[chat]) return S.chatNames[chat]
   let name = ''
   try {
-    name = (await feishu.chatName?.(chat)) ?? ''
+    name = (await im.chatName?.(chat)) ?? ''
   } catch (e) {
     log(`查不到会话 ${chat} 的名字：${e.message}`)
   }
@@ -770,7 +784,7 @@ async function nameOf(openId) {
   if (nameMissing.has(openId)) return ''
   let name = ''
   try {
-    name = (await feishu.userName?.(openId)) ?? ''
+    name = (await im.userName?.(openId)) ?? ''
   } catch (e) {
     log(`查不到 ${openId} 的名字：${e.message}`)
   }
@@ -799,12 +813,20 @@ async function onEvent({ chat, chatType, message: m }) {
   const id = m.message_id
   if (seen.has(id)) return
   const isGroup = chatType !== 'p2p'
+  if (!CAPS.history) { // 没有按 id 取消息的接口：事件里的发送者就是最终的，直接进门
+    try {
+      admit(await withName(m, chat, isGroup), chat, isGroup)
+    } catch (e) {
+      log(`事件入队失败 ${id}：${e.message}`)
+    }
+    return
+  }
   try {
     const known = senderOf(m.sender?.id)
     if (known) admit(await withName({ ...m, sender: { ...m.sender, id: known } }, chat, isGroup), chat, isGroup)
     else {
       const begin = Date.now()
-      const got = await feishu.getMessage(id)
+      const got = await im.getMessage(id)
       if (!got) throw new Error('查不到这条消息')
       log(`get 确认 ${id}：${Date.now() - begin}ms，发送者 ${got.sender?.id}`)
       rememberSender(m.sender?.id, got.sender?.id)
@@ -819,7 +841,7 @@ async function onEvent({ chat, chatType, message: m }) {
 }
 
 async function catchUp(only) {
-  const gs = only ? [] : await feishu.listChats()
+  const gs = only ? [] : await im.listChats()
   const chats = only ? [only] : [...gs, ...dmChats]
   const begin = Date.now()
   for (const chat of chats) await catchUpChat(chat, !dmChats.has(chat), Boolean(only))
@@ -836,6 +858,7 @@ let retryWait = RETRY_MIN_MS
 const pending = new Set()
 const QUEUE_LOG_MS = 100
 function schedule(only) {
+  if (!CAPS.history) return tail // 没有历史接口的平台不补漏，只靠长连接实时收
   const key = only ?? '*'
   if (pending.has(key) || pending.has('*')) return tail
   pending.add(key)
@@ -927,6 +950,7 @@ function onLine(sock, line) {
   else if (m.t === 'hello') {
     bridge = { sock, claudePid: m.claudePid, bridgePid: m.bridgePid }
     log(`桥已连上：claude ${m.claudePid}`)
+    setTimeout(kickNotice, 0)
     if (S.claudePid === m.claudePid) { // 同一会话重连，忙闲沿用
       refreshCard()
       deliver()
@@ -939,11 +963,11 @@ function onLine(sock, line) {
   } else if (m.t === 'tools') { // 桥连上后取工具列表，常驻进程换版后桥据此通知客户端
     write(sock, { t: 'tools-result', id: m.id, tools: TOOLS })
   } else if (m.t === 'call') {
-    callTool(TOOL_OPS, m.name, m.args ?? {}).then(result => write(sock, { t: 'call-result', id: m.id, result }))
+    callTool(TOOL_OPS, m.name, m.args ?? {}, PLATFORM).then(result => write(sock, { t: 'call-result', id: m.id, result }))
   } else if (m.t === 'reply' || m.t === 'schedule' || m.t === 'unread') { // 旧版桥：工具写死在桥里，按旧消息格式答
     const name = m.t === 'reply' ? 'reply' : m.t === 'unread' ? 'read_unread' : `schedule_${m.action}`
     const args = m.t === 'reply' ? { chat_id: m.chat_id, text: m.text } : m.args ?? {}
-    callTool(TOOL_OPS, name, args).then(r => write(sock, { t: 'reply-result', id: m.id, ok: !r.isError, text: r.content[0].text }))
+    callTool(TOOL_OPS, name, args, PLATFORM).then(r => write(sock, { t: 'reply-result', id: m.id, ok: !r.isError, text: r.content[0].text }))
   }
 }
 
@@ -951,6 +975,10 @@ const TOOL_OPS = { send, readUnread, schedule: (action, args) => onSchedule({ ac
 const write = (sock, m) => sock.write(`${JSON.stringify(m)}\n`)
 
 let stopping = false
+const KICKED_WARNING = '长连接被另一处接管，本机已停用'
+const KICKED_HINT = `${PLATFORM.label}长连接被另一处的新连接接管了，本机已停止收发（不重连，免得两边来回抢）。要在本机继续用，先确认另一处已经停了，再跑 node bin/restart.mjs`
+let kicked = existsSync(P.kicked)
+let stopListen = null
 if (!P.pipe) rmSync(P.sock, { force: true }) // Unix socket 文件会残留；Windows 命名管道随进程消失
 const server = createServer(sock => {
   sock.on('error', () => {})
@@ -981,9 +1009,10 @@ function shutdown(why) {
 
 /** 核心权限缺失就退出；其余只提示。查询本身失败不挡启动 */
 async function selfCheck() {
+  if (!CAPS.scopes) return
   let granted
   try {
-    granted = await feishu.grantedScopes()
+    granted = await im.grantedScopes()
   } catch (e) {
     return log(`权限查询失败，跳过自检：${e.message}`)
   }
@@ -1008,9 +1037,21 @@ server.listen(P.sock, async () => {
   // 给 bin/restart.mjs 认人：pid 加启动时刻，防 pid 被复用后杀错
   writeFileSync(P.pidFile, JSON.stringify({ pid: process.pid, start: proc.start(process.pid) }))
   await selfCheck()
-  me = cfg.appId
+  me = accountId(cfg)
   await schedule()
-  feishu.listen({
+  if (kicked) {
+    log(`${P.kicked} 在：长连接之前被另一处的新连接接管过，这次不连。确认另一处已经停了，再跑 node bin/restart.mjs 拿回来`)
+    warnings.add(KICKED_WARNING)
+  } else listen()
+  if (SWEEP_MS > 0 && CAPS.history) setInterval(() => schedule(), SWEEP_MS).unref()
+  setInterval(watchdog, 5000).unref()
+  setInterval(tick, TICK_MS).unref()
+  const poll = () => pollRecalls().catch(e => log(`撤回轮询失败：${e.message}`)).finally(() => setTimeout(poll, RECALL_POLL_MS).unref())
+  if (RECALL_POLL_MS > 0 && CAPS.recall) setTimeout(poll, RECALL_POLL_MS).unref()
+})
+
+function listen() {
+  stopListen = im.listen({
     onConnected: () => {
       log('长连接已连上')
       schedule() // 补上断线和启动空档
@@ -1029,10 +1070,30 @@ server.listen(P.sock, async () => {
       eventRecalled.add(id)
       onRecall(id)
     },
+    // 同一个账号只能有一条有效长连接的平台：被另一处的新连接踢下线。不重连（重连会把对方踢掉，两边来回抢），
+    // 留标记、停用 reply，告诉会话；常驻进程不退出（退出会被外层循环拉起来再抢）
+    onKicked: reason => {
+      kicked = true
+      writeFileSync(P.kicked, JSON.stringify({ at: Date.now(), reason }))
+      log(`长连接被另一处接管（${reason}），本机不再重连。确认另一处已经停了，再跑 node bin/restart.mjs 拿回来`)
+      warnings.add(KICKED_WARNING)
+      try {
+        stopListen?.()
+      } catch {}
+      kickNotice()
+    },
+    // 重试也没用的错误（凭据错了）：退出码 78，外层循环等 5 分钟再拉
+    onFatal: why => {
+      log(`长连接无法建立，退出：${why}`)
+      process.exit(78)
+    },
   })
-  if (SWEEP_MS > 0) setInterval(() => schedule(), SWEEP_MS).unref()
-  setInterval(watchdog, 5000).unref()
-  setInterval(tick, TICK_MS).unref()
-  const poll = () => pollRecalls().catch(e => log(`撤回轮询失败：${e.message}`)).finally(() => setTimeout(poll, RECALL_POLL_MS).unref())
-  if (RECALL_POLL_MS > 0) setTimeout(poll, RECALL_POLL_MS).unref()
-})
+}
+
+/** 被踢之后每个会话告诉一次：reply 已停用，怎么拿回来 */
+let kickNoticed = 0
+function kickNotice() {
+  if (!kicked || !bridge || kickNoticed === S.claudePid) return
+  kickNoticed = S.claudePid
+  enqueue({ notice: true, urgent: true, chat: cfg.statusChat ?? '', content: `[${PLATFORM.label} channel] ${KICKED_HINT}。这期间别人发的消息收不到。` })
+}
