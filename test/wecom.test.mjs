@@ -50,12 +50,12 @@ test('企业微信适配器：能力表关掉卡片、表情、补拉、撤回�
   } finally { s.done() }
 })
 
-test('企业微信适配器：单聊文字、语音转文字、引用照收；群消息丢掉', async () => {
+test('企业微信适配器：单聊文字、引用照收；语音只给提示；群消息丢掉', async () => {
   const s = await setup()
   try {
     await until(() => s.got.connected === 1, '认证')
     s.fake.push(textMsg('m1', 'alice', '你好'))
-    s.fake.push({ ...textMsg('m2', 'alice', ''), msgtype: 'voice', voice: { content: '语音转的文字' }, text: undefined })
+    s.fake.push({ ...textMsg('m2', 'alice', ''), msgtype: 'voice', voice: { content: '企业微信转的文字' }, text: undefined })
     s.fake.push({ ...textMsg('m3', 'alice', '回这条'), quote: { msgtype: 'text', text: { content: '原来那句' } } })
     s.fake.push({ ...textMsg('g1', 'alice', '群里 @'), chattype: 'group', chatid: 'chat_example' })
     await until(() => s.got.messages.length === 3, '三条单聊')
@@ -67,7 +67,7 @@ test('企业微信适配器：单聊文字、语音转文字、引用照收；�
     assert.deepEqual(a.message.sender, { id: 'alice', sender_type: 'user', name: '' })
     assert.ok(Math.abs(a.message.create_ms - Date.now()) < 60_000, '秒级时间戳换成毫秒')
     assert.equal(b.message.msg_type, 'voice')
-    assert.equal(b.message.content, '语音转的文字')
+    assert.equal(b.message.content, '[语音] 暂不支持语音，请发文字')
     assert.equal(c.message.content, '> 引用：原来那句\n回这条')
     await until(() => s.logs.some(l => l.includes('跳过群消息 g1')), '群消息记日志')
   } finally { s.done() }
@@ -127,6 +127,21 @@ test('企业微信适配器：网络断了自动重连，重连后照常收', as
     s.fake.push(textMsg('after', 'alice', '重连之后'))
     await until(() => s.got.messages.some(e => e.message.message_id === 'after'), '重连后收到')
     assert.equal(s.got.kicked.length, 0)
+  } finally { s.done() }
+})
+
+test('企业微信适配器：心跳没有回执时当断线，自己断开重连', async () => {
+  const s = await setup({ heartbeatMs: 40 })
+  try {
+    await until(() => s.got.connected === 1, '认证')
+    await until(() => s.fake.pings >= 2, '心跳在发')
+    s.fake.mute = true
+    await until(() => s.got.connected === 2, '心跳断了之后重连')
+    s.fake.mute = false
+    s.fake.push(textMsg('hb', 'alice', '心跳恢复后'))
+    await until(() => s.got.messages.some(e => e.message.message_id === 'hb'), '重连后收到')
+    assert.equal(s.got.kicked.length, 0)
+    assert.ok(s.logs.some(l => l.includes('长连接断开')), s.logs.join(' | '))
   } finally { s.done() }
 })
 

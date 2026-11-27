@@ -12,7 +12,7 @@
  *   以及 caps 里声明有的那些方法。message 的结构：{ message_id, msg_type, content, create_time, create_ms, deleted, sender: { id, sender_type, name } }
  *
  * 这里只做单聊：群里 @ 机器人的消息记日志后丢掉。
- * 收：文字原样；语音用企业微信转好的文字；图片、文件下载解密后存到 <状态目录>/<wecom-botId>-media/，正文给本地路径
+ * 收：文字原样；语音暂不支持，只给提示；图片、文件下载解密后存到 <状态目录>/<wecom-botId>-media/，正文给本地路径
  *   （下载地址 5 分钟就过期，收到就下）；视频只给占位。
  * 发：主动推送（aibot_send_msg）的 markdown。对方先给机器人发过消息才推得出去。
  * 同一个机器人同一时间只能有一条有效长连接，新连接会踢掉旧的：被踢时 SDK 不重连，这里报 onKicked，由 daemon 停用。
@@ -87,6 +87,7 @@ export function connect(cfg, log, deps = {}) {
     ...(cfg.wsUrl ? { wsUrl: cfg.wsUrl } : {}),
     maxReconnectAttempts: -1, // 网络断了一直重连（指数退避，最长 30 秒一次）
     ...(cfg.reconnectBaseMs ? { reconnectInterval: cfg.reconnectBaseMs } : {}),
+    ...(cfg.heartbeatMs ? { heartbeatInterval: cfg.heartbeatMs } : {}), // 默认 30 秒；连续两次没回执就当断线，断开重连
     logger: sdkLogger(log),
   })
   const mediaDir = paths(cfg).media
@@ -118,7 +119,7 @@ export function connect(cfg, log, deps = {}) {
   function quoteText(q) {
     if (!q) return ''
     const body = q.msgtype === 'text' ? q.text?.content
-      : q.msgtype === 'voice' ? q.voice?.content
+      : q.msgtype === 'voice' ? '[语音]'
         : q.msgtype === 'mixed' ? (q.mixed?.msg_item ?? []).map(x => (x.msgtype === 'text' ? x.text?.content : '[图片]')).join('')
           : `[${q.msgtype === 'image' ? '图片' : q.msgtype === 'file' ? '文件' : q.msgtype}]`
     return `> 引用：${String(body ?? '').replace(/\n/g, ' ').slice(0, 200)}\n`
@@ -129,7 +130,7 @@ export function connect(cfg, log, deps = {}) {
     const id = b.msgid
     switch (b.msgtype) {
       case 'text': return b.text?.content ?? ''
-      case 'voice': return b.voice?.content ?? ''
+      case 'voice': return '[语音] 暂不支持语音，请发文字'
       case 'image': return media(id, 0, b.image ?? {}, 'image')
       case 'file': return media(id, 0, b.file ?? {}, 'file')
       case 'video': return '[视频] 暂不支持下载'

@@ -1,4 +1,4 @@
-// 假企业微信长连接服务：照官方 SDK 的帧格式回认证、心跳、主动推送的回执，能推消息、踢连接、断网；另起一个 HTTP 服务放加密的附件。
+// 假企业微信长连接服务：照官方 SDK 的帧格式回认证、心跳、主动推送的回执，能推消息、踢连接、断网、不回心跳；另起一个 HTTP 服务放加密的附件。
 // 和真服务一样：同一个机器人新连接认证成功后，旧连接收到 disconnected_event 再被断开。
 import { createCipheriv, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
@@ -34,6 +34,8 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
     current: null, // 当前有效连接
     authOk: true,
     sendErr: 0, // 主动推送回执的 errcode
+    pings: 0, // 收到的心跳次数
+    mute: false, // 不回心跳（连接还在，对面不响应）
     secretsSeen: [],
     waiters: [],
     /** 推一条消息回调（body 照官方格式） */
@@ -80,7 +82,8 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
         fake.current = ws
         if (old && old !== ws) fake.kick(old)
       } else if (f.cmd === 'ping') {
-        ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
+        fake.pings++
+        if (!fake.mute) ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
       } else if (f.cmd === 'aibot_send_msg') {
         fake.sent.push(f.body)
         ws.send(JSON.stringify({ headers: { req_id: id }, errcode: fake.sendErr, errmsg: fake.sendErr ? 'not allowed' : 'ok' }))
