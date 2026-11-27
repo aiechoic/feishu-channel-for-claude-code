@@ -1,4 +1,5 @@
 // 放行：按发送者 id（allow），或整群放行（allowChats 里的群，群里谁发都算）；其余丢弃并记日志。自己机器人发的跳过。
+// 平台声明 allowAllByDefault（企业微信）时默认谁发都放行，配置 restrict: true 才按 allow / allowChats 收窄。
 // 只送达（observe）：observe 为 true 时机器人在的全部会话，写成 { chats, dms } 时列出的群（和开了 dms 时的私信）里，
 // 白名单外的人发的消息也入队，标成外部发送者（meta.trust=external）。和白名单的一样忙时送达，但不授权：
 // 「停」当普通消息；撤回只从队列撤下，已送出的不拦工具、不杀进程，只补发作废说明（忙时也送）；送达不解除「停」暂停的定时。合并时不和白名单消息混在一条。
@@ -12,6 +13,8 @@ export function install(ctx) {
   const { cfg, P, S, save, log, im, CAPS, rt } = ctx
   const ALLOW = new Set(cfg.allow)
   const ALLOW_CHATS = new Set(cfg.allowChats ?? [])
+  const ALLOW_ALL = Boolean(ctx.PLATFORM.allowAllByDefault) && !cfg.restrict
+  if (ALLOW_ALL) log('全部放行：发来的消息都当白名单（配置 restrict: true 才按 allow / allowChats 收窄）')
   // observe: true 是机器人在的全部群和私信；写成 { chats, dms } 时只收这些
   const OBSERVE_ALL = cfg.observe === true
   const OBSERVE_CHATS = new Set(cfg.observe?.chats ?? [])
@@ -52,7 +55,7 @@ export function install(ctx) {
       return null
     }
     if (sender === rt.me || m.msg_type === 'system') return null
-    if (ALLOW.has(sender) || (isGroup && ALLOW_CHATS.has(chat))) return 'allow'
+    if (ALLOW_ALL || ALLOW.has(sender) || (isGroup && ALLOW_CHATS.has(chat))) return 'allow'
     if (observed(chat, isGroup)) return 'external'
     log(`丢弃 ${m.message_id}：发送者 ${sender} 不在白名单（会话 ${chat}）`)
     return null

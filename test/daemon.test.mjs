@@ -544,6 +544,7 @@ test('未读摘要只提示一次：再补漏、常驻进程重启都不重复�
     await until(() => r.pushes.length === 2, '新消息照常送')
     assert.equal(r.pushes[1].meta.message_id, 'om_next')
     assert.doesNotMatch(r.pushes[1].content, /未读摘要/)
+    await until(() => /已送出 1 条：om_next/.test(r.log()), '常驻进程收到送达确认') // 没确认就杀，重启后会重送
 
     r.daemon.kill('SIGKILL')
     r.link.destroy()
@@ -636,6 +637,11 @@ test('真桥先于常驻进程启动：连接失败后重试，消息和 reply �
     assert.equal(got[0].meta.message_id, 'om_1')
     const res = await client.callTool({ name: 'reply', arguments: { chat_id: 'oc_group', text: 'hi' } })
     assert.match(res.content[0].text, /已发送/)
+    // reply_to 走回复接口；send_file 先上传再发
+    assert.match((await client.callTool({ name: 'reply', arguments: { chat_id: 'oc_group', text: '回这条', reply_to: 'om_1' } })).content[0].text, /已发送/)
+    writeFileSync(join(r.dir, 'a.png'), 'png')
+    assert.match((await client.callTool({ name: 'send_file', arguments: { chat_id: 'oc_group', path: join(r.dir, 'a.png') } })).content[0].text, /已发送/)
+    assert.deepEqual(r.file('sent.txt').trim().split(/\r?\n/).slice(-3), ['oc_group|hi', 'oc_group|回这条|reply:om_1', 'oc_group|[image key_1]'])
     assert.ok((await client.listTools()).tools.some(t => t.name === 'read_unread'))
     assert.match((await client.callTool({ name: 'read_unread', arguments: { chat_id: 'oc_group' } })).content[0].text, /没有未读/)
     assert.ok((await client.callTool({ name: 'read_unread', arguments: { chat_id: 'bad' } })).isError)

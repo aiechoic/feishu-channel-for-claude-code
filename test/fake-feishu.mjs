@@ -32,9 +32,17 @@ export function connect() {
       if (!(openId in names)) throw new Error('无权查通讯录')
       return names[openId]
     },
-    async sendText(chat, text) {
-      appendFileSync(`${dir}/sent.txt`, `${chat}|${text}\n`)
+    async sendText(chat, text, opts) {
+      appendFileSync(`${dir}/sent.txt`, `${chat}|${text}${opts?.replyTo ? `|reply:${opts.replyTo}` : ''}\n`)
       return 'om_sent'
+    },
+    async upload(path) {
+      appendFileSync(`${dir}/uploads.txt`, `${path}\n`)
+      return { kind: path.endsWith('.png') ? 'image' : 'file', id: 'key_1' }
+    },
+    async sendMedia(chat, { kind, id }) {
+      appendFileSync(`${dir}/sent.txt`, `${chat}|[${kind} ${id}]\n`)
+      return 'om_media'
     },
     async addReaction(id, emoji) {
       appendFileSync(`${dir}/reactions.txt`, `${id} ${emoji}\n`)

@@ -17,6 +17,8 @@ import { paths } from '../src/common.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
 const OLD_TOOLS = ['read_unread', 'reply', 'schedule_add', 'schedule_list', 'schedule_remove']
+/** 现在的常驻进程给的工具（飞书）：原来那 5 个加 send_file */
+const TOOLS = [...OLD_TOOLS, 'send_file'].sort()
 
 async function until(cond, what, ms = 15_000) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(50)) if (await cond()) return
@@ -93,14 +95,14 @@ test('常驻进程换版：桥重连后发 list_changed，重新 tools/list 看�
     await r.startDaemon()
     const claude = await r.client()
     const codex = await r.client(undefined, { FEISHU_CODEX_TOOLS_ONLY: '1' })
-    for (const c of [claude, codex]) assert.deepEqual(await names(c), OLD_TOOLS)
+    for (const c of [claude, codex]) assert.deepEqual(await names(c), TOOLS)
     assert.match(textOf(await claude.callTool({ name: 'read_unread', arguments: { chat_id: 'oc_group' } })), /没有未读/)
 
     await r.stopDaemon()
     await r.startDaemon(v2)
     for (const c of [claude, codex]) await until(() => c.changed === 1, 'list_changed')
     for (const c of [claude, codex]) {
-      assert.deepEqual(await names(c), [...OLD_TOOLS, 'ping'].sort())
+      assert.deepEqual(await names(c), [...TOOLS, 'ping'].sort())
       assert.equal(textOf(await c.callTool({ name: 'ping', arguments: {} })), 'pong')
       assert.ok((await c.callTool({ name: 'reply', arguments: { chat_id: 'bad', text: 'x' } })).isError, '参数校验在常驻进程')
     }
@@ -109,7 +111,7 @@ test('常驻进程换版：桥重连后发 list_changed，重新 tools/list 看�
     await r.stopDaemon()
     await r.startDaemon()
     await until(() => claude.changed === 2, '第二次 list_changed')
-    assert.deepEqual(await names(claude), OLD_TOOLS)
+    assert.deepEqual(await names(claude), TOOLS)
     assert.match(textOf(await claude.callTool({ name: 'ping', arguments: {} })), /未知工具/)
     await r.stopDaemon()
     await r.startDaemon()

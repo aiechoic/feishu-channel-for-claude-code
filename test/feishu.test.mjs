@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { formatContent, fromEvent, ownPins, withRetry } from '../src/feishu.mjs'
+import { formatContent, fromEvent, ownPins, uploadKindOf, withRetry } from '../src/feishu.mjs'
 
 test('网络错误重试，飞书业务错误不重试', async () => {
   let n = 0
@@ -57,4 +57,13 @@ test('ownPins：置顶人是本机器人，或本机器人发的卡片；keep �
     { message_id: 'om_err', operator_id: 'ou_user' },
   ]
   assert.deepEqual(await ownPins(pins, 'cli_me', 'om_new', senderOf), ['om_byme', 'om_a'])
+})
+
+test('发文件：图片 ≤ 10MB 按图片，其余按文件并带飞书的 file_type；空文件和超过 30MB 报错', () => {
+  assert.deepEqual(uploadKindOf('a.PNG', 100), { kind: 'image' })
+  assert.deepEqual(uploadKindOf('a.jpg', 11 << 20), { kind: 'file', fileType: 'stream' })
+  assert.deepEqual(uploadKindOf('周报.docx', 100), { kind: 'file', fileType: 'doc' })
+  assert.deepEqual(uploadKindOf('a.zip', 100), { kind: 'file', fileType: 'stream' })
+  assert.throws(() => uploadKindOf('a.txt', 0), /空文件/)
+  assert.throws(() => uploadKindOf('a.zip', 31 << 20), /30MB/)
 })

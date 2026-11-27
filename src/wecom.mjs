@@ -1,15 +1,6 @@
 /**
  * 企业微信适配器：智能机器人的 API 模式 + 长连接，用官方 Node SDK（@wecom/aibot-node-sdk）。
- *
- * 适配器接口（飞书的 feishu.mjs 也照这个）：connect(cfg, log) 返回
- *   platform   平台名
- *   caps       支持哪些功能，没有的 daemon 整段跳过：card 状态卡片和置顶、reaction 回执表情、
- *              history 补拉（listChats / listMessages / getMessage）、recall 撤回、scopes 查权限
- *   isChatId   会话 id 的格式
- *   listen(h)  收消息；h 有 onConnected()、onMessage({ chat, chatType, message, eventMs })、onRecall(id)、
- *              onKicked(reason)（被另一处的新连接踢下线）、onFatal(why)（重试也没用的错误）。返回关连接的函数
- *   sendText(chat, text) → 发出去的消息 id
- *   以及 caps 里声明有的那些方法。message 的结构：{ message_id, msg_type, content, create_time, create_ms, deleted, sender: { id, sender_type, name } }
+ * 接口见 platform.mjs 开头。caps 全关：没有卡片、表情、补拉、撤回、查权限。
  *
  * 单聊和群聊。群里只有 @ 机器人的消息会推过来（平台规则，没有开关），会话 id 是群的 chatid，发送人是 from.userid；
  * 正文去掉开头 @ 机器人的那一段。
@@ -28,6 +19,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { WSClient as SdkClient } from '@wecom/aibot-node-sdk'
 import { paths } from './common.mjs'
+import { stamp, toMs } from './core/message.mjs'
 import { PLATFORMS } from './platform.mjs'
 
 /** 图片按扩展名认；上限按平台规则 */
@@ -46,18 +38,7 @@ export function mediaKindOf(path, size) {
 /** 收到消息后多久内能被动回复（平台规则 24 小时，留一点余量） */
 const REPLY_WINDOW_MS = 23.5 * 3600_000
 
-const stamp = ms => {
-  const d = new Date(ms)
-  const p = n => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
-
-/** 回调里的 create_time：秒或毫秒都认；没有时用收到的时刻 */
-export const toMs = t => {
-  const n = Number(t)
-  if (!Number.isFinite(n) || n <= 0) return Date.now()
-  return n < 1e12 ? n * 1000 : n
-}
+export { toMs }
 
 /** 按文件头认图片格式，认不出给 .img */
 function imageExt(buf) {

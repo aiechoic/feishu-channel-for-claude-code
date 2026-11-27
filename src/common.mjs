@@ -21,7 +21,8 @@ export function readConfig() {
   const cfg = JSON.parse(readFileSync(file, 'utf8'))
   const p = platformOf(cfg)
   if (p.name === 'wecom') {
-    if (!cfg.botId || !cfg.botSecretFile || !cfg.allow?.length) throw new Error(`${file} 缺 botId、botSecretFile 或 allow`)
+    if (!cfg.botId || !cfg.botSecretFile) throw new Error(`${file} 缺 botId 或 botSecretFile`)
+    if (cfg.restrict && !cfg.allow?.length && !cfg.allowChats?.length) throw new Error(`${file} 开了 restrict，要配 allow 或 allowChats`)
   } else if (!cfg.appId || !cfg.allow?.length) throw new Error(`${file} 缺 appId 或 allow`)
   return cfg
 }

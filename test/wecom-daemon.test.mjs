@@ -135,14 +135,14 @@ test('企业微信 channel：白名单里的 userid 发的单聊送进会话，r
   assert.ok(!log.includes('secret_example'), 'Secret 不进日志')
 }))
 
-test('企业微信 channel：白名单外的人默认丢掉；开了 observe 的单聊送进会话、标 trust="external"，「停」不当真', async () => {
-  await withRig({}, async (r, fake) => {
+test('企业微信 channel：restrict 时白名单外的人丢掉；开了 observe 的单聊送进会话、标 trust="external"，「停」不当真', async () => {
+  await withRig({ restrict: true }, async (r, fake) => {
     fake.push(textMsg('x1', 'bob', '外人'))
     await until(() => r.log().includes('丢弃 x1'), '丢弃')
     await sleep(200)
     assert.equal(r.pushes.length, 0)
   })
-  await withRig({ observe: { dms: true } }, async (r, fake) => {
+  await withRig({ restrict: true, observe: { dms: true } }, async (r, fake) => {
     fake.push(textMsg('x2', 'bob', '代理商反馈：小程序打不开'))
     await until(() => r.pushes.length === 1, '外部送达')
     assert.equal(r.pushes[0].meta.trust, 'external')
@@ -155,9 +155,9 @@ test('企业微信 channel：白名单外的人默认丢掉；开了 observe 的
   })
 })
 
-test('企业微信 channel：群里 @ 机器人的消息按发送人放行；allowChats 里的群谁发都放行；reply 回到群', async () => {
+test('企业微信 channel：restrict 时群里 @ 机器人的消息按发送人放行；allowChats 里的群谁发都放行；reply 回到群', async () => {
   const group = (id, user, text, chatid = 'chat_a') => ({ ...textMsg(id, user, `@机器人 ${text}`), chattype: 'group', chatid })
-  await withRig({}, async (r, fake) => {
+  await withRig({ restrict: true }, async (r, fake) => {
     fake.push(group('g1', 'alice', '群里问一句'))
     await until(() => r.pushes.length === 1, '白名单的人在群里 @ 送达')
     const { meta, content } = r.pushes[0]
@@ -176,7 +176,7 @@ test('企业微信 channel：群里 @ 机器人的消息按发送人放行；all
     fake.push(group('g2', 'bob', '外人'))
     await until(() => r.log().includes('丢弃 g2'), '白名单外的人在群里丢弃')
   })
-  await withRig({ allowChats: ['chat_a'] }, async (r, fake) => {
+  await withRig({ restrict: true, allowChats: ['chat_a'] }, async (r, fake) => {
     fake.push(group('g3', 'bob', '整群放行'))
     await until(() => r.pushes.length === 1, '放行群里谁发都送达')
     assert.equal(r.pushes[0].meta.trust, undefined)
@@ -185,6 +185,30 @@ test('企业微信 channel：群里 @ 机器人的消息按发送人放行；all
     fake.push(textMsg('g5', 'bob', '单聊'))
     await until(() => r.log().includes('丢弃 g5'), 'allowChats 不管单聊')
   })
+})
+
+test('企业微信 channel：默认全部放行，不配 allow 也行；谁发的都当白名单，「停」也当真', async () => {
+  const fake = await startFake()
+  const r = new Rig(fake, { allow: undefined })
+  try {
+    await r.start()
+    await r.bridge()
+    await until(() => fake.authed === 1, '长连接认证')
+    assert.ok(r.log().includes('全部放行'))
+    fake.push(textMsg('a1', 'bob', '单聊'))
+    fake.push({ ...textMsg('a2', 'carol', '@机器人 群里'), chattype: 'group', chatid: 'chat_x' })
+    await until(() => r.pushes.length === 1, '送达')
+    assert.equal(r.pushes[0].meta.trust, undefined)
+    r.idle()
+    await until(() => r.pushes.length === 2, '群消息也送达')
+    assert.equal(r.pushes[1].meta.chat_id, 'chat_x')
+    r.idle()
+    fake.push(textMsg('a3', 'dave', '停'))
+    await until(() => r.log().includes('收到「停」'), '谁发的「停」都当真')
+  } finally {
+    await r.close()
+    fake.close()
+  }
 })
 
 test('企业微信 channel：send_file 把本机图片按图片、其他按文件发出去；不存在的文件报错', () => withRig({}, async (r, fake) => {

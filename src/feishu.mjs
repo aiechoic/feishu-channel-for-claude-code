@@ -1,16 +1,27 @@
 // 飞书适配器：只用官方 Node SDK。daemon 只依赖这里导出的接口（接口说明见 wecom.mjs 开头），测试用 CHANNEL_ADAPTER / FEISHU_ADAPTER 换成假实现。
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
+import { basename, extname } from 'node:path'
 import * as lark from '@larksuiteoapi/node-sdk'
+import { stamp } from './core/message.mjs'
 import { PLATFORMS } from './platform.mjs'
 
 const secret = cfg => process.env.FEISHU_APP_SECRET
   ?? (cfg.appSecretFile ? readFileSync(cfg.appSecretFile, 'utf8').trim() : cfg.appSecret)
 
-const stamp = ms => {
-  const d = new Date(Number(ms))
-  const p = n => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+/** 发文件：按扩展名选图片 / 文件和飞书的 file_type；图片 ≤ 10MB、文件 ≤ 30MB（官方上限） */
+const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tiff', '.tif', '.heic'])
+const FILE_TYPE = { '.opus': 'opus', '.mp4': 'mp4', '.pdf': 'pdf', '.doc': 'doc', '.docx': 'doc', '.xls': 'xls', '.xlsx': 'xls', '.ppt': 'ppt', '.pptx': 'ppt' }
+const MAX_IMAGE = 10 << 20
+const MAX_FILE = 30 << 20
+
+/** 本机文件该怎么传：{ kind: 'image' } 或 { kind: 'file', fileType }；空文件、太大抛错 */
+export function uploadKindOf(path, size) {
+  if (size <= 0) throw new Error('不能发空文件')
+  const ext = extname(path).toLowerCase()
+  if (IMAGE_EXT.has(ext) && size <= MAX_IMAGE) return { kind: 'image' }
+  if (size > MAX_FILE) throw new Error(`文件 ${Math.ceil(size / 1048576)}MB，超过飞书的 30MB 上限`)
+  return { kind: 'file', fileType: FILE_TYPE[ext] ?? 'stream' }
 }
 
 function postText(body) {
@@ -130,11 +141,39 @@ export function connect(cfg, log) {
       const data = ok(await client.contact.user.get({ path: { user_id: openId }, params: { user_id_type: 'open_id' } }))
       return data?.user?.name ?? ''
     },
-    async sendText(chat, text) {
+    /** 发文本；带 replyTo（收到的 message_id）时用回复接口，飞书里显示引用那条 */
+    async sendText(chat, text, { replyTo } = {}) {
+      const uuid = randomUUID()
+      const data = { msg_type: 'text', content: JSON.stringify({ text }), uuid }
+      if (replyTo) return withRetry(async () => ok(await client.im.message.reply({ path: { message_id: replyTo }, data })).message_id)
+      return withRetry(async () => ok(await client.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: chat, ...data },
+      })).message_id)
+    },
+    /** 本机文件上传：图片拿 image_key，其余拿 file_key；返回 { kind, id } 给 sendMedia */
+    async upload(path) {
+      const st = statSync(path)
+      if (!st.isFile()) throw new Error(`${path} 不是文件`)
+      const { kind, fileType } = uploadKindOf(path, st.size)
+      const body = readFileSync(path)
+      if (kind === 'image') {
+        const r = await client.im.image.create({ data: { image_type: 'message', image: body } })
+        const id = (r?.data ?? r)?.image_key
+        if (!id) throw new Error(`上传图片没拿到 image_key：${JSON.stringify(r).slice(0, 200)}`)
+        return { kind, id }
+      }
+      const r = await client.im.file.create({ data: { file_type: fileType, file_name: basename(path), file: body } })
+      const id = (r?.data ?? r)?.file_key
+      if (!id) throw new Error(`上传文件没拿到 file_key：${JSON.stringify(r).slice(0, 200)}`)
+      return { kind, id }
+    },
+    async sendMedia(chat, { kind, id }) {
+      const content = JSON.stringify(kind === 'image' ? { image_key: id } : { file_key: id })
       const uuid = randomUUID()
       return withRetry(async () => ok(await client.im.message.create({
         params: { receive_id_type: 'chat_id' },
-        data: { receive_id: chat, msg_type: 'text', content: JSON.stringify({ text }), uuid },
+        data: { receive_id: chat, msg_type: kind, content, uuid },
       })).message_id)
     },
     async addReaction(id, emoji) {
