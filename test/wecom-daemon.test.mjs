@@ -123,7 +123,7 @@ test('企业微信 channel：白名单里的 userid 发的单聊送进会话，r
   assert.ok(bad.isError)
   assert.match(bad.content[0].text, /userid/)
   const { tools } = await r.ask({ t: 'tools' })
-  assert.deepEqual(tools.map(t => t.name), ['reply', 'schedule_add', 'schedule_list', 'schedule_remove'])
+  assert.deepEqual(tools.map(t => t.name), ['reply', 'send_file', 'schedule_add', 'schedule_list', 'schedule_remove'])
   assert.match(tools[0].description, /企业微信/)
   // 同一条消息重推（SDK 的回调可能重复）不再送
   fake.push(textMsg('m1', 'alice', '这周的反馈'))
@@ -186,6 +186,31 @@ test('企业微信 channel：群里 @ 机器人的消息按发送人放行；all
     await until(() => r.log().includes('丢弃 g5'), 'allowChats 不管单聊')
   })
 })
+
+test('企业微信 channel：send_file 把本机图片按图片、其他按文件发出去；不存在的文件报错', () => withRig({}, async (r, fake) => {
+  const png = join(r.dir, '图.png')
+  writeFileSync(png, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(700 * 1024, 1)]))
+  const txt = join(r.dir, 'report.txt')
+  writeFileSync(txt, '周报')
+  const a = await r.call('send_file', { chat_id: 'alice', path: png })
+  assert.ok(!a.isError, a.content[0].text)
+  const b = await r.call('send_file', { chat_id: 'chat_a', path: txt })
+  assert.ok(!b.isError, b.content[0].text)
+  assert.deepEqual(fake.uploads.map(u => [u.type, u.filename, u.data.length]), [['image', '图.png', 700 * 1024 + 4], ['file', 'report.txt', 6]])
+  assert.deepEqual(fake.sent.map(s => [s.chatid, s.msgtype, s[s.msgtype].media_id]), [['alice', 'image', 'media_1'], ['chat_a', 'file', 'media_2']])
+  const bad = await r.call('send_file', { chat_id: 'alice', path: join(r.dir, 'nope.txt') })
+  assert.ok(bad.isError)
+  assert.match(bad.content[0].text, /发送失败/)
+}))
+
+test('企业微信 channel：同一会话发太快时排队，要等太久直接报错', () => withRig({ rateLimit: { perMinute: 2, perHour: 100, maxWaitSec: 1 } }, async (r, fake) => {
+  for (const t of ['1', '2']) assert.ok(!(await r.call('reply', { chat_id: 'alice', text: t })).isError)
+  const res = await r.call('reply', { chat_id: 'alice', text: '3' })
+  assert.ok(res.isError)
+  assert.match(res.content[0].text, /秒后才能再发/)
+  assert.ok(!(await r.call('reply', { chat_id: 'bob', text: '别的会话不受影响' })).isError)
+  assert.deepEqual(fake.sent.map(s => s.markdown.content), ['1', '2', '别的会话不受影响'])
+}))
 
 test('企业微信 channel：白名单发「停」照常停，回执走主动推送', () => withRig({}, async (r, fake) => {
   fake.push(textMsg('s1', 'alice', '停'))

@@ -21,7 +21,19 @@ export function toolsFor(p = PLATFORMS.feishu) {
       required: ['chat_id', 'text'],
     },
   }
-  return [reply, ...COMMON.filter(t => p.unread || t.name !== 'read_unread')]
+  const sendFile = {
+    name: 'send_file',
+    description: `把本机的一个文件发到${p.label}会话：png / jpg / gif（≤ 10MB）按图片发，其余按文件发（≤ 20MB）。对方先给机器人发过消息才发得出去`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: { type: 'string', description: `会话 id（${p.chatIdHint}）` },
+        path: { type: 'string', description: '本机文件的绝对路径' },
+      },
+      required: ['chat_id', 'path'],
+    },
+  }
+  return [reply, ...(p.sendFile ? [sendFile] : []), ...COMMON.filter(t => p.unread || t.name !== 'read_unread')]
 }
 
 const COMMON = [{
@@ -68,7 +80,7 @@ export const TOOLS = toolsFor(PLATFORMS.feishu)
 
 /**
  * 执行一次 tools/call，返回 MCP 的 CallToolResult。
- * ops 由常驻进程给：send(chat, text) → Promise<message_id>；readUnread(args) → 文本；schedule(action, args) → 文本。
+ * ops 由常驻进程给：send(chat, text, opts) → Promise<message_id>；sendFile(chat, path) → Promise<id>；readUnread(args) → 文本；schedule(action, args) → 文本。
  * p 是平台（会话 id 的格式按它查），不给时是飞书。出错一律返回 isError 结果，不抛。
  */
 export async function callTool(ops, name, args = {}, p = PLATFORMS.feishu) {
@@ -79,6 +91,14 @@ export async function callTool(ops, name, args = {}, p = PLATFORMS.feishu) {
       try {
         const opts = p.quoteReply && args.reply_to ? { replyTo: String(args.reply_to) } : undefined
         return text(`已发送 ${await (opts ? ops.send(args.chat_id, args.text, opts) : ops.send(args.chat_id, args.text))}`)
+      } catch (e) {
+        return text(`发送失败：${e.message}`, true)
+      }
+    }
+    if (name === 'send_file' && p.sendFile) {
+      if (!p.isChatId(args.chat_id) || !args.path) return text(`${badChat}，path 不能为空`, true)
+      try {
+        return text(`已发送 ${await ops.sendFile(args.chat_id, String(args.path))}`)
       } catch (e) {
         return text(`发送失败：${e.message}`, true)
       }

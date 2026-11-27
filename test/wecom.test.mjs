@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { test } from 'node:test'
-import { connect, safeName, stripMention, toMs, withImageExt } from '../src/wecom.mjs'
+import { connect, mediaKindOf, safeName, stripMention, toMs, withImageExt } from '../src/wecom.mjs'
 import { startFake, textMsg } from './fake-wecom-server.mjs'
 
 async function until(cond, what) {
@@ -203,6 +203,10 @@ test('企业微信适配器：文件名去掉路径和非法字符；图片扩�
   assert.equal(withImageExt('image', '.gif'), 'image.gif')
   assert.equal(withImageExt('a.png', '.img'), 'a.png')
   assert.equal(withImageExt('image', '.img'), 'image.img')
+  assert.equal(mediaKindOf('a.PNG', 1000), 'image')
+  assert.equal(mediaKindOf('a.jpg', 11 << 20), 'file', '超过 10MB 的图片按文件发')
+  assert.equal(mediaKindOf('a.pdf', 1000), 'file')
+  assert.throws(() => mediaKindOf('a.zip', 21 << 20), /20MB/)
   assert.equal(stripMention('@机器人 你好'), '你好')
   assert.equal(stripMention('  @机器人'), '')
   assert.equal(stripMention('你好 @机器人'), '你好 @机器人')

@@ -30,6 +30,7 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
     url: `ws://127.0.0.1:${wss.address().port}`,
     sent: [], // 收到的 aibot_send_msg 的 body
     responded: [], // 收到的被动回复 aibot_respond_msg：{ req_id, body }
+    uploads: [], // 上传完成的素材：{ media_id, type, filename, data }
     subscribes: 0, // 认证请求次数
     authed: 0, // 认证成功次数
     current: null, // 当前有效连接
@@ -68,6 +69,7 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
     },
   }
 
+  const pendingUploads = new Map()
   wss.on('connection', ws => {
     ws.on('message', raw => {
       const f = JSON.parse(String(raw))
@@ -85,6 +87,18 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
       } else if (f.cmd === 'ping') {
         fake.pings++
         if (!fake.mute) ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
+      } else if (f.cmd === 'aibot_upload_media_init') {
+        const uid = `up_${fake.uploads.length + 1}_${Date.now()}`
+        pendingUploads.set(uid, { type: f.body.type, filename: f.body.filename, parts: [] })
+        ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok', body: { upload_id: uid } }))
+      } else if (f.cmd === 'aibot_upload_media_chunk') {
+        pendingUploads.get(f.body.upload_id).parts[f.body.chunk_index] = Buffer.from(f.body.base64_data, 'base64')
+        ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
+      } else if (f.cmd === 'aibot_upload_media_finish') {
+        const u = pendingUploads.get(f.body.upload_id)
+        const media_id = `media_${fake.uploads.length + 1}`
+        fake.uploads.push({ media_id, type: u.type, filename: u.filename, data: Buffer.concat(u.parts) })
+        ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok', body: { media_id, type: u.type } }))
       } else if (f.cmd === 'aibot_respond_msg') {
         fake.responded.push({ req_id: id, body: f.body })
         ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))

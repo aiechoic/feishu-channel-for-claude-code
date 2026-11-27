@@ -18,14 +18,30 @@
  * 发：主动推送（aibot_send_msg）的 markdown。对方先给机器人发过消息才推得出去。
  *   带 replyTo（收到的 message_id）时改走被动回复（aibot_respond_msg），群里会引用那条消息；只认本进程 24 小时内收到的，
  *   找不到（重启过、超时、不是这个会话的）就退回主动推送。
+ * 发文件：upload 分片上传临时素材，sendMedia 再主动推送 image / file。图片（png、jpg、gif）≤ 10MB，其余按文件发，≤ 20MB。
+ * 限额（limits，排队由公共的 outbox 做）：平台给每个会话的回复和推送合计 30 条/分钟、1000 条/小时，
+ *   上传每个机器人 30 次/分钟、1000 次/小时；这里压低一点给默认值。
  * 同一个机器人同一时间只能有一条有效长连接，新连接会踢掉旧的：被踢时 SDK 不重连，这里报 onKicked，由 daemon 停用。
  * Secret 只从 botSecretFile 读，不写日志。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { extname, join } from 'node:path'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { basename, extname, join } from 'node:path'
 import { WSClient as SdkClient } from '@wecom/aibot-node-sdk'
 import { paths } from './common.mjs'
 import { PLATFORMS } from './platform.mjs'
+
+/** 图片按扩展名认；上限按平台规则 */
+const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif'])
+const MAX_IMAGE = 10 << 20
+const MAX_FILE = 20 << 20
+
+/** 本地文件该按什么发：'image' / 'file'；太大或不是文件时抛错 */
+export function mediaKindOf(path, size) {
+  const image = IMAGE_EXT.has(extname(path).toLowerCase())
+  if (image && size <= MAX_IMAGE) return 'image'
+  if (size > MAX_FILE) throw new Error(`文件 ${Math.ceil(size / 1048576)}MB，超过企业微信的 20MB 上限`)
+  return 'file'
+}
 
 /** 收到消息后多久内能被动回复（平台规则 24 小时，留一点余量） */
 const REPLY_WINDOW_MS = 23.5 * 3600_000
@@ -165,6 +181,7 @@ export function connect(cfg, log, deps = {}) {
   const api = {
     platform: 'wecom',
     caps: { card: false, reaction: false, history: false, recall: false, scopes: false },
+    limits: { chat: { perMinute: 20, perHour: 900 }, upload: { perMinute: 20, perHour: 900 } },
     isChatId: PLATFORMS.wecom.isChatId,
 
     /** 回调消息体 → { chat, chatType, message }：单聊的会话 id 是对方 userid，群聊是 chatid；认不出的返回 null */
@@ -200,6 +217,21 @@ export function connect(cfg, log, deps = {}) {
       }
       if (replyTo) log(`回复 ${replyTo} 找不到原消息（重启过、超过 24 小时或不是这个会话），改为直接发`)
       const ack = await client.sendMessage(chat, body)
+      return ack?.headers?.req_id ?? ''
+    },
+
+    /** 本地文件上传成临时素材（3 天有效），返回 { kind, id } 给 sendMedia */
+    async upload(path) {
+      const st = statSync(path)
+      if (!st.isFile()) throw new Error(`${path} 不是文件`)
+      const kind = mediaKindOf(path, st.size)
+      const { media_id: id } = await client.uploadMedia(readFileSync(path), { type: kind, filename: safeName(basename(path), kind) })
+      return { kind, id }
+    },
+
+    /** 把上传好的附件主动推送到会话 */
+    async sendMedia(chat, { kind, id }) {
+      const ack = await client.sendMediaMessage(chat, kind, id)
       return ack?.headers?.req_id ?? ''
     },
 

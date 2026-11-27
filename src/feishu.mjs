@@ -98,6 +98,8 @@ export function connect(cfg, log) {
     platform: 'feishu',
     /** 飞书什么都有：卡片、表情、补拉、撤回、查权限 */
     caps: { card: true, reaction: true, history: true, recall: true, scopes: true },
+    /** 官方频控：发消息接口整个应用 1000 次/分钟，同一会话 5 次/秒；本机按会话 60 条/分钟起步 */
+    limits: { chat: { perMinute: 60, perHour: 3000 }, app: { perMinute: 1000, perHour: 60000 }, upload: { perMinute: 60, perHour: 3000 } },
     isChatId: PLATFORMS.feishu.isChatId,
     async grantedScopes() {
       const data = ok(await client.request({ method: 'GET', url: '/open-apis/application/v6/scopes' }))

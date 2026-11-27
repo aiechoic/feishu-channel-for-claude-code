@@ -30,6 +30,7 @@ import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { paths, readConfig } from './common.mjs'
 import { checkScopes } from './doctor.mjs'
+import { outbox, limitsOf } from './core/outbox.mjs'
 import { accountId, platformOf } from './platform.mjs'
 import proc, { COMMAND_TOOLS, isCommandShell } from './proc.mjs'
 import { next, parseAdd, procStart, wall } from './schedule.mjs'
@@ -44,6 +45,7 @@ mkdirSync(P.dir, { recursive: true })
 const adapterFile = process.env.CHANNEL_ADAPTER ?? process.env.FEISHU_ADAPTER
 const adapter = adapterFile ? pathToFileURL(adapterFile).href : PLATFORM.adapter
 const im = (await import(adapter)).connect(cfg, msg => log(msg))
+const box = outbox(limitsOf(im.limits, cfg.rateLimit))
 /**
  * 适配器支持哪些功能；没写的按有（飞书全有）。没有的整段跳过：
  * card 状态卡片和置顶，reaction 回执表情，history 补拉（列会话、拉历史、按 id 取消息），recall 撤回，scopes 查权限
@@ -176,7 +178,7 @@ function refreshCard() {
         await im.patchCard(S.card, content)
         return
       }
-      S.card = await im.sendCard(cfg.statusChat, content)
+      S.card = await box.send(cfg.statusChat, () => im.sendCard(cfg.statusChat, content))
       save()
       // 旧卡片的置顶先取消（换了机器、状态目录丢了时本机没有记录），群里只留一张；失败不挡新卡片置顶
       try {
@@ -456,7 +458,7 @@ function enqueue(item) {
 
 const send = (chat, text, opts) => {
   if (kicked) return Promise.reject(new Error(KICKED_HINT))
-  return opts ? im.sendText(chat, text, opts) : im.sendText(chat, text)
+  return box.send(chat, () => (opts ? im.sendText(chat, text, opts) : im.sendText(chat, text)))
 }
 
 /** 写停止标记拦下工具调用，杀当前工具进程；返回杀了没有 */
@@ -972,7 +974,14 @@ function onLine(sock, line) {
   }
 }
 
-const TOOL_OPS = { send, readUnread, schedule: (action, args) => onSchedule({ action, args }) }
+async function sendFile(chat, path) {
+  if (kicked) throw new Error(KICKED_HINT)
+  if (!im.upload) throw new Error(`${PLATFORM.label}不支持发文件`)
+  const media = await box.upload(() => im.upload(path))
+  return box.send(chat, () => im.sendMedia(chat, media))
+}
+
+const TOOL_OPS = { send, sendFile, readUnread, schedule: (action, args) => onSchedule({ action, args }) }
 const write = (sock, m) => sock.write(`${JSON.stringify(m)}\n`)
 
 let stopping = false
