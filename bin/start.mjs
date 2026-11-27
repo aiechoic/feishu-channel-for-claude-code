@@ -23,7 +23,7 @@ if (!existsSync(cfgFile)) {
   say({
     env: '改环境变量 FEISHU_CHANNEL_CONFIG 指到实际的配置文件，或去掉它。',
     installed: '安装时 --config 指的文件不在了：重跑 node bin/install.mjs --config <配置文件>。',
-    default: '照本仓库的 config.example.json 建一份：放在工作目录的 .feishu-channel/config.json（一台机器几个机器人时用这个），或者这个默认位置；字段见 README「配置」。',
+    default: '照本仓库的 config.example.json 建一份：放在工作目录的 .feishu-channel/config.json（一台机器几个机器人时用这个），或者这个默认位置；字段见 README 的 Configuration 一节。',
   }[source])
   process.exit(1)
 }
