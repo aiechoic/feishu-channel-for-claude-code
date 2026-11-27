@@ -141,6 +141,39 @@ test('setup.mjs 与 start.mjs 生成的文件一样（共用一份逻辑）', ()
   }
 })
 
+test('工作目录的 .feishu-channel/config.json 写了 withConfigs：飞书和企业微信一起接，单接的用法不变', () => {
+  const t = sandbox()
+  try {
+    const dir = join(t.cwd, '.feishu-channel')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'wecom.json'), JSON.stringify({ platform: 'wecom', botId: 'bot_x', botSecretFile: join(dir, 'secret') }))
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ appId: 'cli_test', allow: ['ou_x'], withConfigs: ['wecom.json'] }))
+    const r = t.run()
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stderr, /一起接：.*wecom\.json/)
+    const a = r.called.args
+    const i = a.indexOf('--dangerously-load-development-channels')
+    assert.deepEqual(a.slice(i + 1, i + 3), ['server:feishu', 'server:wecom'])
+    const m = a.indexOf('--mcp-config')
+    assert.deepEqual(a.slice(m + 1, m + 3), [join(dir, 'mcp.json'), join(dir, 'wecom-mcp.json')])
+    assert.equal(a[a.indexOf('--settings') + 1], join(dir, 'channels-settings.json'))
+    for (const f of ['mcp.json', 'wecom-mcp.json', 'channels-settings.json']) assert.ok(existsSync(join(dir, f)), f)
+    // 去掉 withConfigs：回到只接飞书，参数和以前一样
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ appId: 'cli_test', allow: ['ou_x'] }))
+    const s = t.run()
+    const b = s.called.args
+    assert.deepEqual(b.slice(0, 6), ['--mcp-config', join(dir, 'mcp.json'), '--settings', join(dir, 'settings.json'), '--dangerously-load-development-channels', 'server:feishu'])
+    // 列的文件不在：说清楚，退出 1，不起 claude
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ appId: 'cli_test', allow: ['ou_x'], withConfigs: ['nope.json'] }))
+    const e = t.run()
+    assert.equal(e.status, 1)
+    assert.match(e.stderr, /nope\.json 不存在/)
+    assert.equal(e.called, null)
+  } finally {
+    t.done()
+  }
+})
+
 test('--continue：当前目录有上次的会话才带；--new 强制开新会话', () => {
   const t = sandbox()
   try {

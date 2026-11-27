@@ -78,13 +78,61 @@ const sameJson = (file, want) => {
 }
 
 /**
- * 写 mcp.json、settings.json。onlyIfStale 时只重写缺了或内容不一致的（比如指向的是另一份仓库）。
- * 返回重写了的文件路径。
+ * 一个会话同时接几个 IM：主配置里写 withConfigs（相对主配置所在目录的路径，或绝对路径），列出要一起接的其他配置，
+ * 比如飞书的 config.json 里写 "withConfigs": ["wecom.json"]。不写就只接主配置自己，和以前一样。
+ * 平台相同的只接第一个；列出的文件不存在时报错（免得以为接上了）。
+ */
+export function channelConfigs(cfgFile) {
+  let main = {}
+  try {
+    main = JSON.parse(readFileSync(cfgFile, 'utf8'))
+  } catch {}
+  const out = [cfgFile]
+  const seen = new Set([platformOf(main).name])
+  for (const rel of main.withConfigs ?? []) {
+    const f = resolve(dirname(cfgFile), rel)
+    if (!existsSync(f)) throw new Error(`${cfgFile} 的 withConfigs 里列的 ${f} 不存在`)
+    const p = platformOfFile(f).name
+    if (seen.has(p)) continue
+    seen.add(p)
+    out.push(f)
+  }
+  return out
+}
+
+/**
+ * 几个 channel 一起接时的文件：每个平台各自的 mcp 文件照常（server 名 feishu / wecom 不撞），
+ * hook 合进同一份 channels-settings.json（每个事件把各平台的 hook 都挂上，几个常驻进程都收到忙闲）。
+ * 只接一个时就是 claudeFiles 的那两份，和以前一样。
+ */
+export function launchFiles(cfgFile) {
+  const cfgs = channelConfigs(cfgFile)
+  const each = cfgs.map(claudeFiles)
+  if (each.length === 1) {
+    const [f] = each
+    return { configs: cfgs, servers: [f.server], mcpFiles: [f.mcpFile], settingsFile: f.settingsFile, files: [[f.mcpFile, f.mcp], [f.settingsFile, f.settings]] }
+  }
+  const hooks = {}
+  for (const f of each) {
+    for (const [event, list] of Object.entries(f.settings.hooks)) hooks[event] = [...(hooks[event] ?? []), ...list]
+  }
+  const settingsFile = join(dirname(cfgFile), 'channels-settings.json')
+  return {
+    configs: cfgs,
+    servers: each.map(f => f.server),
+    mcpFiles: each.map(f => f.mcpFile),
+    settingsFile,
+    files: [...each.map(f => [f.mcpFile, f.mcp]), [settingsFile, { hooks }]],
+  }
+}
+
+/**
+ * 写 mcp.json、settings.json（几个 channel 一起接时是各自的 mcp 文件加合并的 channels-settings.json）。
+ * onlyIfStale 时只重写缺了或内容不一致的（比如指向的是另一份仓库）。返回重写了的文件路径。
  */
 export function writeClaudeFiles(cfgFile, { onlyIfStale = false } = {}) {
-  const f = claudeFiles(cfgFile)
   const written = []
-  for (const [file, want] of [[f.mcpFile, f.mcp], [f.settingsFile, f.settings]]) {
+  for (const [file, want] of launchFiles(cfgFile).files) {
     if (onlyIfStale && sameJson(file, want)) continue
     writeFileSync(file, JSON.stringify(want, null, 2))
     written.push(file)
@@ -92,16 +140,16 @@ export function writeClaudeFiles(cfgFile, { onlyIfStale = false } = {}) {
   return written
 }
 
-/** 接上 channel 的 claude 参数（不含会话相关的） */
+/** 接上 channel 的 claude 参数（不含会话相关的）。--mcp-config 和 --dangerously-load-development-channels 都能接多个值 */
 export function channelArgs(cfgFile) {
-  const f = claudeFiles(cfgFile)
-  return ['--mcp-config', f.mcpFile, '--settings', f.settingsFile, '--dangerously-load-development-channels', `server:${f.server}`]
+  const f = launchFiles(cfgFile)
+  return ['--mcp-config', ...f.mcpFiles, '--settings', f.settingsFile, '--dangerously-load-development-channels', ...f.servers.map(s => `server:${s}`)]
 }
 
 /** 给人看的启动命令（setup.mjs 打印） */
 export function channelCommand(cfgFile) {
-  const f = claudeFiles(cfgFile)
-  return `claude --mcp-config ${q(f.mcpFile)} --settings ${q(f.settingsFile)} --dangerously-load-development-channels server:${f.server}`
+  const f = launchFiles(cfgFile)
+  return `claude --mcp-config ${f.mcpFiles.map(q).join(' ')} --settings ${q(f.settingsFile)} --dangerously-load-development-channels ${f.servers.map(s => `server:${s}`).join(' ')}`
 }
 
 /**

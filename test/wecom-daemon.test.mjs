@@ -312,6 +312,44 @@ test('飞书和企业微信两个 channel 同一台机器、同一个状态目�
   }
 })
 
+test('一个会话接两个 channel：channels-settings.json 里的 hook 两个常驻进程都收到；任一边「停」都拦下工具', async () => {
+  const fake = await startFake()
+  const w = new Rig(fake)
+  const dir = w.dir
+  writeFileSync(join(dir, 'messages.json'), '[]')
+  const fcfg = join(dir, 'config.json')
+  writeFileSync(fcfg, JSON.stringify({ appId: 'cli_me', appSecret: 'x', allow: ['ou_ok'], stateDir: dir, sweepSec: 0, recallPollSec: 0, withConfigs: ['wecom-config.json'] }))
+  const fP = paths({ appId: 'cli_me', stateDir: dir })
+  const feishu = spawn(process.execPath, [join(ROOT, 'src', 'daemon.mjs')], { env: { ...process.env, FEISHU_CHANNEL_CONFIG: fcfg, FEISHU_ADAPTER: join(HERE, 'fake-feishu.mjs'), FAKE: dir }, stdio: 'ignore' })
+  const flog = () => (existsSync(fP.log) ? readFileSync(fP.log, 'utf8') : '')
+  try {
+    await w.start()
+    await until(() => flog().includes('常驻进程启动'), '飞书常驻进程启动')
+    const { launchFiles, writeClaudeFiles } = await import('../src/claude-launch.mjs')
+    writeClaudeFiles(fcfg)
+    const settings = JSON.parse(readFileSync(launchFiles(fcfg).settingsFile, 'utf8'))
+    // 照 Claude Code 的做法：一个事件把挂着的 hook 命令全跑一遍
+    const fire = (event, extra = {}) => settings.hooks[event].flatMap(h => h.hooks).map(h => {
+      const [, hook, cfg] = h.command.match(/^node "(.+?)" "(.+?)"$/)
+      return spawnSync(process.execPath, [hook, cfg], { input: JSON.stringify({ hook_event_name: event, ...extra }), encoding: 'utf8' })
+    })
+    fire('UserPromptSubmit')
+    await until(() => flog().includes('hook UserPromptSubmit') && w.log().includes('hook UserPromptSubmit'), '两边都收到 UserPromptSubmit')
+    fire('PreToolUse', { tool_name: 'Bash', tool_use_id: 't1', tool_input: {} })
+    await until(() => flog().includes('hook PreToolUse Bash') && w.log().includes('hook PreToolUse Bash'), '两边都收到 PreToolUse')
+    // 企业微信那边停了：它的 hook 拦下，飞书那边的不拦
+    writeFileSync(w.P.stopFlag, 'test')
+    const outs = fire('PreToolUse', { tool_name: 'Bash', tool_use_id: 't2', tool_input: {} }).map(r => r.stdout)
+    assert.equal(outs[0], '', '飞书的 hook 没拦')
+    assert.match(outs[1], /企业微信收到「停」/)
+    assert.match(outs[1], /"permissionDecision":"deny"/)
+  } finally {
+    feishu.kill('SIGKILL')
+    await w.close()
+    fake.close()
+  }
+})
+
 test('platform 写了不认识的值：常驻进程启动就报错退出，不回退成飞书', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wecom-channel-'))
   try {

@@ -103,6 +103,7 @@ One JSON file per bot. `platform` selects the IM (`"feishu"` when omitted). An u
 | `observe` | off | Also deliver messages from untrusted senders, marked `trust="external"`. `true` = every chat the bot is in; `{ "chats": [...], "dms": true }` narrows it |
 | `statusChat` | | Chat for scheduled messages (and the status card on Feishu). Without it there are no schedules |
 | `names` | | Sender id → display name |
+| `withConfigs` | | Other configs to load into the same session, e.g. `["wecom.json"]`. See [One session, two channels](#one-session-two-channels) |
 | `rateLimit` | platform defaults | Override send limits: `{ perMinute, perHour, appPerMinute, appPerHour, uploadPerMinute, uploadPerHour, maxWaitSec }`. See [Rate limits](#rate-limits) |
 | `stateDir` | `~/.local/state/feishu-channel` | State directory |
 | `timezone` | `Asia/Shanghai` | Time zone for schedules |
@@ -138,6 +139,22 @@ One JSON file per bot. `platform` selects the IM (`"feishu"` when omitted). An u
 | `heartbeatMs` | `30000` | Heartbeat interval; two missed acks count as a dead connection and trigger a reconnect |
 
 **WeCom admits everyone by default.** WeCom AI bots can only be used by members of the company and cannot be added to external groups (groups with WeChat users), so every sender is already an internal member. Set `restrict: true` to fall back to `allow` / `allowChats`.
+
+### One session, two channels
+
+To feed one Claude Code session from both Feishu and WeCom, keep both configs in the same directory and list the second one in the main config:
+
+```json
+// .feishu-channel/config.json (Feishu)
+{ "appId": "cli_xxx", "appSecretFile": "...", "allow": ["ou_xxx"], "withConfigs": ["wecom.json"] }
+```
+
+```json
+// .feishu-channel/wecom.json (WeCom)
+{ "platform": "wecom", "botId": "xxx", "botSecretFile": "..." }
+```
+
+`withConfigs` paths are relative to the main config's directory (absolute paths also work); a listed file that does not exist is an error. `team-claude` and `setup` then pass both MCP files (`mcp.json`, `wecom-mcp.json`), one merged `channels-settings.json` whose hooks report to both daemons, and `--dangerously-load-development-channels server:feishu server:wecom`. Each platform keeps its own daemon, state files and tools (`mcp__feishu__*`, `mcp__wecom__*`); a stop from either side ends the current turn. Without `withConfigs` nothing changes: only the main config is loaded.
 
 A Feishu and a WeCom channel can run on the same machine and share a state directory: WeCom state files are named `wecom-<botId>…`, the MCP server is called `wecom` (tools `mcp__wecom__reply` etc., launch flag `server:wecom`), and `setup` writes `wecom-mcp.json` / `wecom-settings.json` when both configs live in the same directory.
 

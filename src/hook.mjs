@@ -6,8 +6,10 @@
 import { existsSync } from 'node:fs'
 import { connect } from 'node:net'
 import { paths, readConfig } from './common.mjs'
+import { platformOf } from './platform.mjs'
 
-const { sock, stopFlag } = paths(readConfig())
+const cfg = readConfig()
+const { sock, stopFlag } = paths(cfg)
 let raw = ''
 for await (const chunk of process.stdin) raw += chunk
 const hook = JSON.parse(raw || '{}')
@@ -30,7 +32,7 @@ await new Promise(resolve => {
 })
 
 // continue:false 只结束这一轮，这次工具调用还要靠 deny 拦住
-const reason = '飞书收到「停」，这一轮结束'
+const reason = `${platformOf(cfg).label}收到「停」，这一轮结束`
 if (stopped) {
   console.log(JSON.stringify({
     continue: false,

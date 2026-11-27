@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * team-claude：带上飞书 channel 启动 Claude Code。
+ * team-claude：带上飞书 / 企业微信 channel 启动 Claude Code。主配置里写了 withConfigs 时，列出的配置（比如企业微信的 wecom.json）一起接。
  *
  *   team-claude            当前目录有上次的会话就接着（--continue），没有就开新的
  *   team-claude --new      强制开新会话
@@ -13,7 +13,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { buildArgs, cmdLine, findClaude, INSTALLED_CONFIG_ENV, resolveConfig, SOURCE_LABEL, writeClaudeFiles } from '../src/claude-launch.mjs'
+import { buildArgs, channelConfigs, cmdLine, findClaude, INSTALLED_CONFIG_ENV, resolveConfig, SOURCE_LABEL, writeClaudeFiles } from '../src/claude-launch.mjs'
 
 const say = s => process.stderr.write(`team-claude: ${s}\n`)
 
@@ -28,6 +28,12 @@ if (!existsSync(cfgFile)) {
   process.exit(1)
 }
 say(`配置：${cfgFile}（来源：${SOURCE_LABEL[source]}）`)
+try {
+  for (const f of channelConfigs(cfgFile).slice(1)) say(`一起接：${f}`)
+} catch (e) {
+  say(e.message)
+  process.exit(1)
+}
 
 for (const f of writeClaudeFiles(cfgFile, { onlyIfStale: true })) say(`已重新生成 ${f}`)
 

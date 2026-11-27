@@ -1,10 +1,10 @@
 // 平台选择：不认识的 platform 报错；飞书和企业微信的状态文件、本机端点、MCP 名字、启动文件互不相撞
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { channelArgs, claudeFiles } from '../src/claude-launch.mjs'
+import { channelArgs, channelCommand, claudeFiles, launchFiles, writeClaudeFiles } from '../src/claude-launch.mjs'
 import { paths } from '../src/common.mjs'
 import { accountId, platformOf } from '../src/platform.mjs'
 
@@ -58,5 +58,36 @@ test('启动文件：MCP server 名字按平台（feishu / wecom），两份配�
     assert.equal(channelArgs(join(dir, 'none.json')).at(-1), 'server:feishu')
     writeFileSync(join(dir, 'bad.json'), JSON.stringify({ platform: 'slack' }))
     assert.throws(() => claudeFiles(join(dir, 'bad.json')), /不认识的 platform/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('一个会话接两个 channel：主配置写 withConfigs，mcp 文件各自一份、hook 合进 channels-settings.json、开发 channel 给两个 server', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'platform-'))
+  try {
+    const f = join(dir, 'config.json')
+    const w = join(dir, 'wecom.json')
+    writeFileSync(f, JSON.stringify({ ...FEISHU, withConfigs: ['wecom.json', 'config.json'] }))
+    writeFileSync(w, JSON.stringify(WECOM))
+    const l = launchFiles(f)
+    assert.deepEqual(l.configs, [f, w], '同平台的（自己）不重复接')
+    assert.deepEqual(l.servers, ['feishu', 'wecom'])
+    assert.deepEqual(l.mcpFiles, [join(dir, 'mcp.json'), join(dir, 'wecom-mcp.json')])
+    assert.equal(l.settingsFile, join(dir, 'channels-settings.json'))
+    const args = channelArgs(f)
+    assert.deepEqual(args, ['--mcp-config', join(dir, 'mcp.json'), join(dir, 'wecom-mcp.json'), '--settings', join(dir, 'channels-settings.json'), '--dangerously-load-development-channels', 'server:feishu', 'server:wecom'])
+    assert.match(channelCommand(f), /server:feishu server:wecom$/)
+    writeClaudeFiles(f)
+    const settings = JSON.parse(readFileSync(join(dir, 'channels-settings.json'), 'utf8'))
+    for (const event of ['UserPromptSubmit', 'Stop', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+      const cmds = settings.hooks[event].flatMap(h => h.hooks.map(x => x.command))
+      assert.equal(cmds.length, 2, event)
+      assert.ok(cmds[0].endsWith('config.json"') && cmds[1].endsWith('wecom.json"'), cmds.join(' | '))
+    }
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(dir, 'wecom-mcp.json'), 'utf8')).mcpServers), ['wecom'])
+    // 单独接企业微信的那份不受影响
+    assert.deepEqual(channelArgs(w), ['--mcp-config', join(dir, 'wecom-mcp.json'), '--settings', join(dir, 'wecom-settings.json'), '--dangerously-load-development-channels', 'server:wecom'])
+    // 列的文件不在：报错
+    writeFileSync(f, JSON.stringify({ ...FEISHU, withConfigs: ['nope.json'] }))
+    assert.throws(() => channelArgs(f), /withConfigs.*不存在/)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
