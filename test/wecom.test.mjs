@@ -126,6 +126,10 @@ test('企业微信适配器：sendText 走主动推送的 markdown；带 replyTo
     await s.im.sendText('alice', '答3', { replyTo: 'q1' })
     assert.deepEqual(s.fake.sent.slice(1).map(b => b.chatid), ['chat_q', 'alice'], '找不到或会话不对就直接发')
     assert.ok(s.logs.some(l => l.includes('找不到原消息')))
+    // 没等到回执：报结果不确定，不说失败
+    s.fake.sendNoAck = true
+    await assert.rejects(() => s.im.sendText('alice', '回执丢了'), e => e.uncertain === true && /可能已经发出/.test(e.message))
+    s.fake.sendNoAck = false
     s.fake.sendErr = 600039
     await assert.rejects(() => s.im.sendText('alice', '再发一条'))
   } finally { s.done() }

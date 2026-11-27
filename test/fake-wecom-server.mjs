@@ -36,6 +36,7 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
     current: null, // 当前有效连接
     authOk: true,
     sendErr: 0, // 主动推送回执的 errcode
+    sendNoAck: false, // 主动推送收到了但不回回执（真机上见过回执晚到）
     pings: 0, // 收到的心跳次数
     mute: false, // 不回心跳（连接还在，对面不响应）
     secretsSeen: [],
@@ -104,6 +105,7 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
         ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
       } else if (f.cmd === 'aibot_send_msg') {
         fake.sent.push(f.body)
+        if (fake.sendNoAck) return
         ws.send(JSON.stringify({ headers: { req_id: id }, errcode: fake.sendErr, errmsg: fake.sendErr ? 'not allowed' : 'ok' }))
       }
     })

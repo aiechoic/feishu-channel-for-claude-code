@@ -234,6 +234,11 @@ test('企业微信 channel：同一会话发太快时排队，要等太久直接
   assert.match(res.content[0].text, /秒后才能再发/)
   assert.ok(!(await r.call('reply', { chat_id: 'bob', text: '别的会话不受影响' })).isError)
   assert.deepEqual(fake.sent.map(s => s.markdown.content), ['1', '2', '别的会话不受影响'])
+  // 回执超时：工具报「结果不确定」，提示先确认别重发
+  fake.sendNoAck = true
+  const lost = await r.call('reply', { chat_id: 'carol', text: '回执丢了' })
+  assert.ok(lost.isError)
+  assert.match(lost.content[0].text, /结果不确定.*别直接重发/)
 }))
 
 test('企业微信 channel：白名单发「停」照常停，回执走主动推送', () => withRig({}, async (r, fake) => {

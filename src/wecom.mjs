@@ -67,6 +67,15 @@ export function safeName(name, fallback) {
   return s && s !== '.' && s !== '..' ? s.slice(0, 120) : fallback
 }
 
+/**
+ * SDK 等回执超时（5 秒）时消息多半已经发出（真机上见过回执晚到、对方照样收到），报成「结果不确定」，
+ * 让会话先确认再决定要不要重发，免得发两遍。
+ */
+const uncertain = p => p.catch(e => {
+  if (!/ack timeout/i.test(e?.message ?? '')) throw e
+  throw Object.assign(new Error(`没等到企业微信的回执（${e.message}），消息可能已经发出`), { uncertain: true })
+})
+
 /** 群消息开头 @ 机器人的那一段（到第一个空白为止）去掉；只 @ 没说话时给空串 */
 export const stripMention = s => String(s ?? '').replace(/^\s*@\S+\s*/, '')
 
@@ -193,11 +202,11 @@ export function connect(cfg, log, deps = {}) {
       const body = { msgtype: 'markdown', markdown: { content: text } }
       const f = replyTo && frames.get(replyTo)
       if (f && f.chat === chat && Date.now() - f.at < REPLY_WINDOW_MS) {
-        const ack = await client.reply({ headers: f.headers }, body)
+        const ack = await uncertain(client.reply({ headers: f.headers }, body))
         return ack?.headers?.req_id ?? ''
       }
       if (replyTo) log(`回复 ${replyTo} 找不到原消息（重启过、超过 24 小时或不是这个会话），改为直接发`)
-      const ack = await client.sendMessage(chat, body)
+      const ack = await uncertain(client.sendMessage(chat, body))
       return ack?.headers?.req_id ?? ''
     },
 
@@ -212,7 +221,7 @@ export function connect(cfg, log, deps = {}) {
 
     /** 把上传好的附件主动推送到会话 */
     async sendMedia(chat, { kind, id }) {
-      const ack = await client.sendMediaMessage(chat, kind, id)
+      const ack = await uncertain(client.sendMediaMessage(chat, kind, id))
       return ack?.headers?.req_id ?? ''
     },
 

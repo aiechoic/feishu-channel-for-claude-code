@@ -73,6 +73,8 @@ const COMMON = [{
   description: '按 id 删定时',
   inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
 }]
+/** 发送出错：结果不确定（适配器标了 uncertain）时提示先确认，别直接重发 */
+const sendError = e => text(e?.uncertain ? `结果不确定：${e.message}。先确认对方收没收到，别直接重发` : `发送失败：${e.message}`, true)
 const text = (t, isError = false) => ({ ...(isError ? { isError: true } : {}), content: [{ type: 'text', text: t }] })
 
 /** 飞书的工具列表（旧版桥按它转发） */
@@ -92,7 +94,7 @@ export async function callTool(ops, name, args = {}, p = PLATFORMS.feishu) {
         const opts = p.quoteReply && args.reply_to ? { replyTo: String(args.reply_to) } : undefined
         return text(`已发送 ${await (opts ? ops.send(args.chat_id, args.text, opts) : ops.send(args.chat_id, args.text))}`)
       } catch (e) {
-        return text(`发送失败：${e.message}`, true)
+        return sendError(e)
       }
     }
     if (name === 'send_file' && p.sendFile) {
@@ -100,7 +102,7 @@ export async function callTool(ops, name, args = {}, p = PLATFORMS.feishu) {
       try {
         return text(`已发送 ${await ops.sendFile(args.chat_id, String(args.path))}`)
       } catch (e) {
-        return text(`发送失败：${e.message}`, true)
+        return sendError(e)
       }
     }
     if (name === 'read_unread' && p.unread) {
