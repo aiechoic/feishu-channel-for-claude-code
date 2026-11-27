@@ -50,8 +50,10 @@ export const PLATFORMS = {
     unread: true,
     /** reply 可带 reply_to：用回复接口，显示引用那条 */
     quoteReply: true,
+    replyToHint: '',
     /** 有 send_file 工具 */
     sendFile: true,
+    sendFileHint: '常见图片格式（≤ 10MB）按图片发，其余按文件发（≤ 30MB）',
     codex: true,
   },
   wecom: {
@@ -76,8 +78,10 @@ export const PLATFORMS = {
     unread: false,
     /** reply 可带 reply_to：被动回复那条消息，群里显示引用 */
     quoteReply: true,
+    replyToHint: '群里显示引用；只认 24 小时内收到的，找不到就直接发',
     /** 有 send_file 工具：本机文件上传后发到会话 */
     sendFile: true,
+    sendFileHint: 'png / jpg / gif（≤ 10MB）按图片发，其余按文件发（≤ 20MB）。对方先给机器人发过消息才发得出去',
     /** 默认全部放行：智能机器人只对企业内部成员可用、进不了外部群。配置 restrict: true 时才按 allow / allowChats 收窄 */
     allowAllByDefault: true,
     codex: false,

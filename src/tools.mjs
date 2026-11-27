@@ -16,14 +16,14 @@ export function toolsFor(p = PLATFORMS.feishu) {
       properties: {
         chat_id: { type: 'string', description: `会话 id（${p.chatIdHint}），取 <channel> 标签里的 chat_id` },
         text: { type: 'string', description: '消息正文' },
-        ...(p.quoteReply ? { reply_to: { type: 'string', description: '可选：回复哪条消息（message_id），群里会引用它；24 小时内收到的才行，找不到就直接发' } } : {}),
+        ...(p.quoteReply ? { reply_to: { type: 'string', description: `可选：回复哪条消息（message_id），会引用它。${p.replyToHint ?? ''}` } } : {}),
       },
       required: ['chat_id', 'text'],
     },
   }
   const sendFile = {
     name: 'send_file',
-    description: `把本机的一个文件发到${p.label}会话：png / jpg / gif（≤ 10MB）按图片发，其余按文件发（≤ 20MB）。对方先给机器人发过消息才发得出去`,
+    description: `把本机的一个文件发到${p.label}会话：${p.sendFileHint}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,9 +73,9 @@ const COMMON = [{
   description: '按 id 删定时',
   inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
 }]
+const text = (t, isError = false) => ({ ...(isError ? { isError: true } : {}), content: [{ type: 'text', text: t }] })
 /** 发送出错：结果不确定（适配器标了 uncertain）时提示先确认，别直接重发 */
 const sendError = e => text(e?.uncertain ? `结果不确定：${e.message}。先确认对方收没收到，别直接重发` : `发送失败：${e.message}`, true)
-const text = (t, isError = false) => ({ ...(isError ? { isError: true } : {}), content: [{ type: 'text', text: t }] })
 
 /** 飞书的工具列表（旧版桥按它转发） */
 export const TOOLS = toolsFor(PLATFORMS.feishu)
