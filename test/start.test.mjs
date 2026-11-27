@@ -34,7 +34,11 @@ process.exit(Number(process.env.FAKE_CODE ?? 0))
     chmodSync(join(bin, 'claude'), 0o755)
   }
   const { FEISHU_CHANNEL_CONFIG: _, ...base } = process.env
-  const env = { ...base, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: claudeDir, FAKE_OUT: out, PATH: `${bin}${delimiter}${process.env.PATH ?? process.env.Path ?? ''}` }
+  // PATH 上本机真装的 claude 要拿掉：Windows 上 findClaude 先在整个 PATH 里找 claude.exe 再找 claude.cmd，
+  // 不拿掉就会起真的 Claude Code（再拉起桥和常驻进程，测完留在后台）
+  const realClaude = d => ['claude', 'claude.exe', 'claude.cmd'].some(n => existsSync(join(d, n)))
+  const rest = (process.env.PATH ?? process.env.Path ?? '').split(delimiter).filter(d => d && !realClaude(d))
+  const env = { ...base, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: claudeDir, FAKE_OUT: out, PATH: [bin, ...rest].join(delimiter) }
   delete env.Path
   const writeConfig = file => {
     mkdirSync(dirname(file), { recursive: true })
