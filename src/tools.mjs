@@ -16,6 +16,7 @@ export function toolsFor(p = PLATFORMS.feishu) {
       properties: {
         chat_id: { type: 'string', description: `会话 id（${p.chatIdHint}），取 <channel> 标签里的 chat_id` },
         text: { type: 'string', description: '消息正文' },
+        ...(p.quoteReply ? { reply_to: { type: 'string', description: '可选：回复哪条消息（message_id），群里会引用它；24 小时内收到的才行，找不到就直接发' } } : {}),
       },
       required: ['chat_id', 'text'],
     },
@@ -76,7 +77,8 @@ export async function callTool(ops, name, args = {}, p = PLATFORMS.feishu) {
     if (name === 'reply') {
       if (!p.isChatId(args.chat_id) || !args.text) return text(`${badChat}，text 不能为空`, true)
       try {
-        return text(`已发送 ${await ops.send(args.chat_id, args.text)}`)
+        const opts = p.quoteReply && args.reply_to ? { replyTo: String(args.reply_to) } : undefined
+        return text(`已发送 ${await (opts ? ops.send(args.chat_id, args.text, opts) : ops.send(args.chat_id, args.text))}`)
       } catch (e) {
         return text(`发送失败：${e.message}`, true)
       }

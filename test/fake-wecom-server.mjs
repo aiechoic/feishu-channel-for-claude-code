@@ -29,6 +29,7 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
   const fake = {
     url: `ws://127.0.0.1:${wss.address().port}`,
     sent: [], // 收到的 aibot_send_msg 的 body
+    responded: [], // 收到的被动回复 aibot_respond_msg：{ req_id, body }
     subscribes: 0, // 认证请求次数
     authed: 0, // 认证成功次数
     current: null, // 当前有效连接
@@ -84,6 +85,9 @@ export async function startFake({ botId = 'bot_example', secret = 'secret_exampl
       } else if (f.cmd === 'ping') {
         fake.pings++
         if (!fake.mute) ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
+      } else if (f.cmd === 'aibot_respond_msg') {
+        fake.responded.push({ req_id: id, body: f.body })
+        ws.send(JSON.stringify({ headers: { req_id: id }, errcode: 0, errmsg: 'ok' }))
       } else if (f.cmd === 'aibot_send_msg') {
         fake.sent.push(f.body)
         ws.send(JSON.stringify({ headers: { req_id: id }, errcode: fake.sendErr, errmsg: fake.sendErr ? 'not allowed' : 'ok' }))

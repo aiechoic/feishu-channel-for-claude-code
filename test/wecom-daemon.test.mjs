@@ -155,6 +155,38 @@ test('企业微信 channel：白名单外的人默认丢掉；开了 observe 的
   })
 })
 
+test('企业微信 channel：群里 @ 机器人的消息按发送人放行；allowChats 里的群谁发都放行；reply 回到群', async () => {
+  const group = (id, user, text, chatid = 'chat_a') => ({ ...textMsg(id, user, `@机器人 ${text}`), chattype: 'group', chatid })
+  await withRig({}, async (r, fake) => {
+    fake.push(group('g1', 'alice', '群里问一句'))
+    await until(() => r.pushes.length === 1, '白名单的人在群里 @ 送达')
+    const { meta, content } = r.pushes[0]
+    assert.equal(content, '群里问一句')
+    assert.equal(meta.chat_id, 'chat_a')
+    assert.equal(meta.chat_type, 'group')
+    assert.equal(meta.sender_id, 'alice')
+    const ok = await r.call('reply', { chat_id: 'chat_a', text: '收到' })
+    assert.ok(!ok.isError, ok.content[0].text)
+    assert.equal(fake.sent.at(-1).chatid, 'chat_a')
+    const quoted = await r.call('reply', { chat_id: 'chat_a', text: '引用回', reply_to: 'g1' })
+    assert.ok(!quoted.isError, quoted.content[0].text)
+    assert.equal(fake.responded.at(-1).req_id, 'cb_g1')
+    const { tools } = await r.ask({ t: 'tools' })
+    assert.ok(tools[0].inputSchema.properties.reply_to, 'reply 工具有 reply_to')
+    fake.push(group('g2', 'bob', '外人'))
+    await until(() => r.log().includes('丢弃 g2'), '白名单外的人在群里丢弃')
+  })
+  await withRig({ allowChats: ['chat_a'] }, async (r, fake) => {
+    fake.push(group('g3', 'bob', '整群放行'))
+    await until(() => r.pushes.length === 1, '放行群里谁发都送达')
+    assert.equal(r.pushes[0].meta.trust, undefined)
+    fake.push(group('g4', 'bob', '别的群', 'chat_b'))
+    await until(() => r.log().includes('丢弃 g4'), '别的群照旧按人')
+    fake.push(textMsg('g5', 'bob', '单聊'))
+    await until(() => r.log().includes('丢弃 g5'), 'allowChats 不管单聊')
+  })
+})
+
 test('企业微信 channel：白名单发「停」照常停，回执走主动推送', () => withRig({}, async (r, fake) => {
   fake.push(textMsg('s1', 'alice', '停'))
   await until(() => fake.sent.some(b => b.markdown.content.startsWith('已停')), '停的回执')

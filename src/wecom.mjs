@@ -11,10 +11,13 @@
  *   sendText(chat, text) → 发出去的消息 id
  *   以及 caps 里声明有的那些方法。message 的结构：{ message_id, msg_type, content, create_time, create_ms, deleted, sender: { id, sender_type, name } }
  *
- * 这里只做单聊：群里 @ 机器人的消息记日志后丢掉。
+ * 单聊和群聊。群里只有 @ 机器人的消息会推过来（平台规则，没有开关），会话 id 是群的 chatid，发送人是 from.userid；
+ * 正文去掉开头 @ 机器人的那一段。
  * 收：文字原样；语音暂不支持，只给提示；图片、文件下载解密后存到 <状态目录>/<wecom-botId>-media/，正文给本地路径
  *   （下载地址 5 分钟就过期，收到就下）；视频只给占位。
  * 发：主动推送（aibot_send_msg）的 markdown。对方先给机器人发过消息才推得出去。
+ *   带 replyTo（收到的 message_id）时改走被动回复（aibot_respond_msg），群里会引用那条消息；只认本进程 24 小时内收到的，
+ *   找不到（重启过、超时、不是这个会话的）就退回主动推送。
  * 同一个机器人同一时间只能有一条有效长连接，新连接会踢掉旧的：被踢时 SDK 不重连，这里报 onKicked，由 daemon 停用。
  * Secret 只从 botSecretFile 读，不写日志。
  */
@@ -23,6 +26,9 @@ import { extname, join } from 'node:path'
 import { WSClient as SdkClient } from '@wecom/aibot-node-sdk'
 import { paths } from './common.mjs'
 import { PLATFORMS } from './platform.mjs'
+
+/** 收到消息后多久内能被动回复（平台规则 24 小时，留一点余量） */
+const REPLY_WINDOW_MS = 23.5 * 3600_000
 
 const stamp = ms => {
   const d = new Date(ms)
@@ -64,6 +70,9 @@ export function safeName(name, fallback) {
   return s && s !== '.' && s !== '..' ? s.slice(0, 120) : fallback
 }
 
+/** 群消息开头 @ 机器人的那一段（到第一个空白为止）去掉；只 @ 没说话时给空串 */
+export const stripMention = s => String(s ?? '').replace(/^\s*@\S+\s*/, '')
+
 /** SDK 的日志接到我们的日志：debug 不要（会打出整条消息体），其余截短 */
 const sdkLogger = log => {
   const line = (lvl, m, args) => log(`SDK ${lvl}：${[m, ...args].map(String).join(' ').slice(0, 300)}`)
@@ -91,6 +100,12 @@ export function connect(cfg, log, deps = {}) {
     logger: sdkLogger(log),
   })
   const mediaDir = paths(cfg).media
+  /** 收到的消息帧：被动回复要用它的 req_id。只留 24 小时（平台的回复期限）、最多 500 条 */
+  const frames = new Map()
+  const remember = (msgid, chat, frame) => {
+    frames.set(msgid, { chat, headers: frame.headers, at: Date.now() })
+    for (const [id, f] of frames) if (frames.size > 500 || Date.now() - f.at > REPLY_WINDOW_MS) frames.delete(id); else break
+  }
 
   /** 下载解密一个附件，存盘，返回本地路径 */
   async function save(msgid, i, item, kind) {
@@ -152,20 +167,23 @@ export function connect(cfg, log, deps = {}) {
     caps: { card: false, reaction: false, history: false, recall: false, scopes: false },
     isChatId: PLATFORMS.wecom.isChatId,
 
-    /** 回调消息体 → { chat, chatType, message }；群消息返回 null（这次只做单聊） */
+    /** 回调消息体 → { chat, chatType, message }：单聊的会话 id 是对方 userid，群聊是 chatid；认不出的返回 null */
     async toEvent(b) {
-      if (b?.chattype !== 'single') return null
+      const group = b?.chattype === 'group'
+      if (!group && b?.chattype !== 'single') return null
+      if (group && !b.chatid) return null
       const createMs = toMs(b.create_time)
       const user = b.from?.userid ?? ''
+      const body = await contentOf(b)
       return {
-        chat: user,
-        chatType: 'p2p',
+        chat: group ? b.chatid : user,
+        chatType: group ? 'group' : 'p2p',
         eventMs: createMs,
         message: {
           message_id: b.msgid,
           msg_type: b.msgtype,
           deleted: false,
-          content: `${quoteText(b.quote)}${await contentOf(b)}`,
+          content: `${quoteText(b.quote)}${group ? stripMention(body) : body}`,
           create_time: stamp(createMs),
           create_ms: createMs,
           sender: { id: user, sender_type: 'user', name: '' },
@@ -173,8 +191,15 @@ export function connect(cfg, log, deps = {}) {
       }
     },
 
-    async sendText(chat, text) {
-      const ack = await client.sendMessage(chat, { msgtype: 'markdown', markdown: { content: text } })
+    async sendText(chat, text, { replyTo } = {}) {
+      const body = { msgtype: 'markdown', markdown: { content: text } }
+      const f = replyTo && frames.get(replyTo)
+      if (f && f.chat === chat && Date.now() - f.at < REPLY_WINDOW_MS) {
+        const ack = await client.reply({ headers: f.headers }, body)
+        return ack?.headers?.req_id ?? ''
+      }
+      if (replyTo) log(`回复 ${replyTo} 找不到原消息（重启过、超过 24 小时或不是这个会话），改为直接发`)
+      const ack = await client.sendMessage(chat, body)
       return ack?.headers?.req_id ?? ''
     },
 
@@ -190,11 +215,7 @@ export function connect(cfg, log, deps = {}) {
       client.on('message', frame => {
         const b = frame?.body
         if (!b?.msgid) return
-        if (b.chattype !== 'single') {
-          log(`跳过群消息 ${b.msgid}（群 ${b.chatid ?? '?'}）：只收单聊`)
-          return
-        }
-        api.toEvent(b).then(ev => ev && h.onMessage(ev)).catch(e => log(`处理消息 ${b.msgid} 失败：${e.message}`))
+        api.toEvent(b).then(ev => { if (!ev) return; remember(b.msgid, ev.chat, frame); h.onMessage(ev) }).catch(e => log(`处理消息 ${b.msgid} 失败：${e.message}`))
       })
       client.connect()
       return () => client.disconnect()

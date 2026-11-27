@@ -78,12 +78,14 @@ node src/codex.mjs /path/to/config.json
 | `platform` | 是 | `"wecom"`。不写是飞书；写了不认识的值，所有入口都直接报错退出 |
 | `botId` | 是 | 机器人的 Bot ID |
 | `botSecretFile` | 是 | 存 Secret 的文件，建议 `chmod 600`。Secret 只从这里读，不进日志 |
-| `allow` | 是 | 放行的成员 userid |
+| `allow` | 是 | 放行的成员 userid（单聊和群里都按它认人）。机器人不是企业超级管理员创建的时候，回调里是加密 userid，让对方先发一句、从日志「事件到达 … 发送者」里抄 |
+| `allowChats` | 否 | 整群放行的群 chatid：这些群里谁 @ 机器人都算白名单。chatid 从日志里抄 |
 | `observe` | 否 | 和飞书一样：`{ "dms": true }` 时白名单外的成员发的单聊也送进会话，标 `trust="external"`（只当数据，不接指令） |
 | `statusChat` | 否 | 定时消息所在的会话，填一个成员的 userid |
 | `names` | 否 | userid → 显示名。企业微信的消息里没有姓名 |
 | `wsUrl` | 否 | 长连接地址，默认 `wss://openws.work.weixin.qq.com`；私有部署的企业在管理端查 |
 | `reconnectBaseMs` | 否 | 断线重连的起始间隔（毫秒），默认 1000，按指数退避，最长 30 秒 |
+| `heartbeatMs` | 否 | 心跳间隔（毫秒），默认 30000；连续两次心跳没有回执就当断线，断开重连 |
 | `stateDir`、`timezone`、`busyTimeoutSec` 等 | 否 | 同飞书，见「配置」 |
 
 一台机器上同时跑飞书和企业微信两个 channel 时互不相撞：企业微信的状态文件按 `wecom-<botId>` 起名（飞书按 appId），Windows 命名管道是 `\\.\pipe\wecom-channel-<botId>-<状态目录哈希>`；MCP server 叫 `wecom`（工具是 `mcp__wecom__reply`，启动参数 `server:wecom`），两份配置放在同一个目录时 `setup` 生成的是 `wecom-mcp.json`、`wecom-settings.json`。
@@ -93,7 +95,8 @@ node src/codex.mjs /path/to/config.json
 | | 企业微信 |
 | --- | --- |
 | 收 | 文字原样；语音暂不支持（正文给一句提示）；图片、文件下载解密后存到 `<stateDir>/wecom-<botId>-media/`，正文给本地路径（下载地址 5 分钟就过期，收到就下）；图文混排逐段给；引用的那条只给文字摘要；视频只有占位 |
-| 回 | `reply` 走主动推送（`aibot_send_msg`），按 markdown 显示。对方要先给机器人发过消息才推得出去 |
+| 群聊 | 群里只有 @ 机器人的消息会推过来（平台规则，没有开关）；会话 id 是群的 chatid，正文去掉开头的 @ |
+| 回 | `reply` 走主动推送（`aibot_send_msg`），按 markdown 显示。对方要先给机器人发过消息才推得出去。带 `reply_to`（收到的 message_id）时改走被动回复，群里显示引用那条；只认 24 小时内、本进程收到的，找不到就直接发。markdown 里写 `<@userid>` 不会变成 @ |
 | 状态卡片、置顶、回执表情 | 没有（企业微信没有对应能力），能力表里关掉 |
 | 补拉未读、`read_unread` | 没有：企业微信没有拉历史消息的接口。只靠长连接实时收，断线期间的消息收不到 |
 | 撤回 | 收不到撤回 |

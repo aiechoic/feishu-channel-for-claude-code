@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { test } from 'node:test'
-import { connect, safeName, toMs, withImageExt } from '../src/wecom.mjs'
+import { connect, safeName, stripMention, toMs, withImageExt } from '../src/wecom.mjs'
 import { startFake, textMsg } from './fake-wecom-server.mjs'
 
 async function until(cond, what) {
@@ -50,16 +50,17 @@ test('企业微信适配器：能力表关掉卡片、表情、补拉、撤回�
   } finally { s.done() }
 })
 
-test('企业微信适配器：单聊文字、引用照收；语音只给提示；群消息丢掉', async () => {
+test('企业微信适配器：单聊文字、引用照收；语音只给提示；群里 @ 的消息会话 id 是 chatid，去掉开头的 @', async () => {
   const s = await setup()
   try {
     await until(() => s.got.connected === 1, '认证')
     s.fake.push(textMsg('m1', 'alice', '你好'))
     s.fake.push({ ...textMsg('m2', 'alice', ''), msgtype: 'voice', voice: { content: '企业微信转的文字' }, text: undefined })
     s.fake.push({ ...textMsg('m3', 'alice', '回这条'), quote: { msgtype: 'text', text: { content: '原来那句' } } })
-    s.fake.push({ ...textMsg('g1', 'alice', '群里 @'), chattype: 'group', chatid: 'chat_example' })
-    await until(() => s.got.messages.length === 3, '三条单聊')
-    const [a, b, c] = s.got.messages
+    s.fake.push({ ...textMsg('g1', 'bob', '@测试机器人 群里问一句'), chattype: 'group', chatid: 'chat_example' })
+    s.fake.push({ ...textMsg('g2', 'bob', 'x'), chattype: 'group' })
+    await until(() => s.got.messages.length === 4, '三条单聊 + 一条群聊')
+    const [a, b, c, g] = s.got.messages
     assert.equal(a.chat, 'alice')
     assert.equal(a.chatType, 'p2p')
     assert.equal(a.message.message_id, 'm1')
@@ -69,7 +70,10 @@ test('企业微信适配器：单聊文字、引用照收；语音只给提示�
     assert.equal(b.message.msg_type, 'voice')
     assert.equal(b.message.content, '[语音] 暂不支持语音，请发文字')
     assert.equal(c.message.content, '> 引用：原来那句\n回这条')
-    await until(() => s.logs.some(l => l.includes('跳过群消息 g1')), '群消息记日志')
+    assert.equal(g.chat, 'chat_example')
+    assert.equal(g.chatType, 'group')
+    assert.equal(g.message.sender.id, 'bob')
+    assert.equal(g.message.content, '群里问一句')
   } finally { s.done() }
 })
 
@@ -106,13 +110,22 @@ test('企业微信适配器：图片、文件、图文混排下载解密后落�
   } finally { s.done() }
 })
 
-test('企业微信适配器：sendText 走主动推送的 markdown；回执报错时抛出', async () => {
+test('企业微信适配器：sendText 走主动推送的 markdown；带 replyTo 走被动回复；回执报错时抛出', async () => {
   const s = await setup()
   try {
     await until(() => s.got.connected === 1, '认证')
     const id = await s.im.sendText('alice', '收到，**谢谢**')
     assert.ok(id)
     assert.deepEqual(s.fake.sent, [{ chatid: 'alice', msgtype: 'markdown', markdown: { content: '收到，**谢谢**' } }])
+    // 带 replyTo：被动回复那条（req_id 是那条回调的），找不到退回主动推送
+    s.fake.push({ ...textMsg('q1', 'alice', '@机器人 问'), chattype: 'group', chatid: 'chat_q' })
+    await until(() => s.got.messages.length === 1, '群消息')
+    await s.im.sendText('chat_q', '答', { replyTo: 'q1' })
+    assert.deepEqual(s.fake.responded, [{ req_id: 'cb_q1', body: { msgtype: 'markdown', markdown: { content: '答' } } }])
+    await s.im.sendText('chat_q', '答2', { replyTo: 'nope' })
+    await s.im.sendText('alice', '答3', { replyTo: 'q1' })
+    assert.deepEqual(s.fake.sent.slice(1).map(b => b.chatid), ['chat_q', 'alice'], '找不到或会话不对就直接发')
+    assert.ok(s.logs.some(l => l.includes('找不到原消息')))
     s.fake.sendErr = 600039
     await assert.rejects(() => s.im.sendText('alice', '再发一条'))
   } finally { s.done() }
@@ -190,6 +203,9 @@ test('企业微信适配器：文件名去掉路径和非法字符；图片扩�
   assert.equal(withImageExt('image', '.gif'), 'image.gif')
   assert.equal(withImageExt('a.png', '.img'), 'a.png')
   assert.equal(withImageExt('image', '.img'), 'image.img')
+  assert.equal(stripMention('@机器人 你好'), '你好')
+  assert.equal(stripMention('  @机器人'), '')
+  assert.equal(stripMention('你好 @机器人'), '你好 @机器人')
   assert.equal(toMs(1_700_000_000), 1_700_000_000_000)
   assert.equal(toMs(1_700_000_000_123), 1_700_000_000_123)
   assert.ok(Math.abs(toMs(undefined) - Date.now()) < 1000)

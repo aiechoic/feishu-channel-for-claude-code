@@ -3,7 +3,7 @@
  * channel 常驻进程：持有事件长连接、已读记录、消息队列、定时和忙闲状态，由 supervise.mjs 负责重启。
  *
  * 收：长连接事件带的内容直接入队；启动 / 连上时和定时全量补漏只补漏。以已读记录为准，不漏不重。
- * 放行：只按发送者 id（allow），不按群；其余丢弃并记日志。自己机器人发的跳过。
+ * 放行：按发送者 id（allow），或整群放行（allowChats 里的群，群里谁发都算）；其余丢弃并记日志。自己机器人发的跳过。
  *   事件里的发送者对不上 allow 时（机器人只有 open_id），按 get 单条拿到的发送者再判一次。
  * 只送达（observe）：observe 为 true 时机器人在的全部会话，写成 { chats, dms } 时列出的群（和开了 dms 时的私信）里，白名单外的人发的消息也入队，标成外部发送者（meta.trust=external）。
  *   和白名单的一样忙时送达，但不授权：「停」当普通消息；撤回只从队列撤下，已送出的不拦工具、不杀进程，只补发作废说明（忙时也送）；
@@ -51,6 +51,7 @@ const im = (await import(adapter)).connect(cfg, msg => log(msg))
 const CAPS = { card: true, reaction: true, history: true, recall: true, scopes: true, ...im.caps }
 const TOOLS = toolsFor(PLATFORM)
 const ALLOW = new Set(cfg.allow)
+const ALLOW_CHATS = new Set(cfg.allowChats ?? [])
 // observe: true 是机器人在的全部群和私信；写成 { chats, dms } 时只收这些
 const OBSERVE_ALL = cfg.observe === true
 const OBSERVE_CHATS = new Set(cfg.observe?.chats ?? [])
@@ -453,9 +454,9 @@ function enqueue(item) {
 
 // ---------- 停和撤回 ----------
 
-const send = (chat, text) => {
+const send = (chat, text, opts) => {
   if (kicked) return Promise.reject(new Error(KICKED_HINT))
-  return im.sendText(chat, text)
+  return opts ? im.sendText(chat, text, opts) : im.sendText(chat, text)
 }
 
 /** 写停止标记拦下工具调用，杀当前工具进程；返回杀了没有 */
@@ -604,7 +605,7 @@ function verdict(m, chat, isGroup) {
     return null
   }
   if (sender === me || m.msg_type === 'system') return null
-  if (ALLOW.has(sender)) return 'allow'
+  if (ALLOW.has(sender) || (isGroup && ALLOW_CHATS.has(chat))) return 'allow'
   if (observed(chat, isGroup)) return 'external'
   log(`丢弃 ${m.message_id}：发送者 ${sender} 不在白名单（会话 ${chat}）`)
   return null
