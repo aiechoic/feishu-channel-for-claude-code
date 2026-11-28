@@ -33,7 +33,14 @@ export function toolsFor(p = PLATFORMS.feishu) {
       required: ['chat_id', 'path'],
     },
   }
-  return [reply, ...(p.sendFile ? [sendFile] : []), ...COMMON.filter(t => p.unread || t.name !== 'read_unread')]
+  // schedule_add 的 chat_id：定时记在哪个会话名下（过了宽限期的跳过回报也发到那里），格式按本平台
+  const scheduleChat = {
+    type: 'string',
+    description: `可选：这条定时记在哪个${p.label}会话名下（${p.chatIdHint}，取 <channel> 标签里的 chat_id），过了宽限期没补发时的说明也发到那里。不填用配置的 statusChat；没配 statusChat 时必填`,
+  }
+  const common = COMMON.filter(t => p.unread || t.name !== 'read_unread').map(t => (t.name !== 'schedule_add' ? t
+    : { ...t, inputSchema: { ...t.inputSchema, properties: { chat_id: scheduleChat, ...t.inputSchema.properties } } }))
+  return [reply, ...(p.sendFile ? [sendFile] : []), ...common]
 }
 
 const COMMON = [{

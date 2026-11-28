@@ -67,6 +67,8 @@ export const PLATFORMS = {
     chatIdHint: '单聊是对方的 userid，群聊是群的 chatid',
     // 单聊的会话 id 就是成员 userid（1～64 位字母、数字和 _ - . @），群聊是回调里的 chatid，格式相同
     isChatId: id => /^[\w.@-]{1,64}$/.test(id ?? ''),
+    // 飞书的会话 id（oc_ / ou_ 开头）：两个 channel 在同一个会话里时，填错平台的直接拦下
+    isForeignChatId: id => /^o[cu]_/.test(id ?? ''),
     fullTextHint: '企业微信没有按 id 取消息的接口，超长部分看不到',
     instructions: () => [
       '企业微信消息以 <channel source="wecom" chat_id="…" message_id="…" sender_id="…" sender_name="…" msg_type="…"> 送达，正文在标签里。单聊的 chat_id 就是对方的 userid，群聊（chat_type="group"）是群的 chatid，群里只有 @ 机器人的消息才会送来，sender_id 是发言人。一条通知可能合并了多条消息，每条前面有 [message_id 发送者 时间]。',

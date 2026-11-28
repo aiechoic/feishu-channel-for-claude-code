@@ -101,7 +101,7 @@ One JSON file per bot. `platform` selects the IM (`"feishu"` when omitted). An u
 | `allow` | | Sender ids that are trusted (see [Two kinds of senders](#two-kinds-of-senders)). Required on Feishu |
 | `allowChats` | | Group ids where every sender is trusted |
 | `observe` | off | Also deliver messages from untrusted senders, marked `trust="external"`. `true` = every chat the bot is in; `{ "chats": [...], "dms": true }` narrows it |
-| `statusChat` | | Chat for scheduled messages (and the status card on Feishu). Without it there are no schedules |
+| `statusChat` | | Default chat for schedules (and the status card on Feishu). Without it, `schedule_add` needs a `chat_id` |
 | `names` | | Sender id → display name |
 | `withConfigs` | | Other configs to load into the same session, e.g. `["wecom.json"]`. See [One session, two channels](#one-session-two-channels) |
 | `rateLimit` | platform defaults | Override send limits: `{ perMinute, perHour, appPerMinute, appPerHour, uploadPerMinute, uploadPerHour, maxWaitSec }`. See [Rate limits](#rate-limits) |
@@ -196,7 +196,7 @@ External messages are never merged with trusted ones. The MCP instructions tell 
 - **Merged delivery**: when idle, queued messages from one chat are merged into one notification. Claude Code silently drops notifications while it is not ready, so a delivery only counts once a hook fires; otherwise it is requeued and retried with back-off (`meta.retry` is set, deduplicate by `message_id`). After `wakeRetryMax` failures retries stop until the session shows activity.
 - **Busy delivery**: senders' messages reach a busy session immediately; Claude Code adds them to the current turn after the running tool call, marked as external content. The daemon's own notices and schedules wait for idle. Nothing is delivered while the stop flag is set.
 - **Stop**: a trusted text message that is exactly `停` clears the queue, kills the foreground Bash / PowerShell process tree, blocks further tool calls, ends the turn, pauses schedules until the next new instruction, and replies with what was dropped.
-- **Schedules**: `once` (`YYYY-MM-DD HH:MM` in the configured time zone, or ISO with offset), `daily`, `weekly`, `process` (wait for a pid). Stored on disk. Missed schedules are delivered later with how late they are, within the grace period; otherwise skipped with a notice.
+- **Schedules**: `once` (`YYYY-MM-DD HH:MM` in the configured time zone, or ISO with offset), `daily`, `weekly`, `process` (wait for a pid). Stored on disk. Each schedule belongs to a chat: the `chat_id` given to `schedule_add` (an id of that channel's platform), or `statusChat` when omitted; with neither, `schedule_add` fails. A due schedule reaches the session as a notice filed under that chat. Missed schedules are delivered later with how late they are, within the grace period; otherwise skipped with a notice sent to that chat. `schedule_list` marks overdue schedules with why they have not fired (session offline, paused by a stop, no chat).
 - **Feishu only** (needs message history, recall and cards):
   - Catch-up: events are queued directly; the daemon also re-reads each chat after an event, on (re)connect and every `sweepSec` to fill gaps. Chats seen for the first time only deliver messages after the install time. Unknown sender open_ids are resolved once with a single-message lookup and cached.
   - Unread folding: a catch-up backlog larger than `unreadFoldAt` for one chat delivers only the newest message with an `[未读摘要]` summary; the rest are kept as unread for `read_unread`.

@@ -851,7 +851,49 @@ test('定时入参校验', () => rig(async r => {
   assert.equal((await tool(r, 'remove', { id: 'nope' })).ok, false)
 }))
 
-test('定时：「停」后暂停，下一条新指令恢复并标明晚了多久', () => rig(async r => {
+test('定时：没配 statusChat 时不带 chat_id 不让加，带了到点照常触发、记在那个会话名下', () => rig(async r => {
+  const none = await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 60_000).toISOString(), text: '没处记' })
+  assert.equal(none.ok, false)
+  assert.match(none.text, /没配 statusChat.*chat_id/)
+  const wrong = await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 60_000).toISOString(), text: 'x', chat_id: 'alice' })
+  assert.equal(wrong.ok, false)
+  assert.match(wrong.text, /飞书的会话 id/)
+  assert.equal((await tool(r, 'list')).text, '没有定时')
+  const add = await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 300).toISOString(), text: '核对价格', chat_id: 'oc_dm' })
+  assert.ok(add.ok, add.text)
+  assert.match(add.text, /会话 oc_dm/)
+  await until(() => r.pushes.length === 1, '到点送达')
+  assert.match(r.pushes[0].content, /\[定时 s1\].*核对价格/)
+  assert.equal(r.pushes[0].meta.chat_id, 'oc_dm')
+  assert.equal(r.file('sent.txt'), '', '到点只是送进会话的通知，不往群里发')
+}, { statusChat: undefined }))
+
+test('定时：跳过回报发到定时自己的会话；列表标出到点没触发的和永远不会触发的', async () => {
+  const r = new Rig({ statusChat: undefined })
+  try {
+    const now = Date.now()
+    writeFileSync(join(r.dir, 'cli_me-state.json'), JSON.stringify({
+      nextScheduleId: 4,
+      schedules: [
+        { id: 's1', kind: 'once', text: '等上线', chat: 'oc_dm', nextAt: now - 30 * 60_000 },
+        { id: 's2', kind: 'once', text: '过期了', chat: 'oc_dm', graceMin: 60, nextAt: now - 5 * 3600_000 },
+        { id: 's3', kind: 'once', text: '没记会话', nextAt: now - 3600_000 },
+      ],
+    }))
+    await r.startDaemon()
+    const offline = (await tool(r, 'list')).text.split('\n')
+    assert.match(offline[0], /^s1 once .*（已过期 30 分钟，未触发：会话不在线） 会话 oc_dm：等上线/)
+    assert.match(offline[2], /^s3 once .*（不会触发：没有会话。删了带 chat_id 重加，或在配置里写 statusChat） 会话 无：没记会话/)
+    await r.bridge()
+    await until(() => r.pushes.length === 1, '补发')
+    assert.match(r.pushes[0].content, /定时 s1.*晚了 30 分钟/)
+    await until(() => r.file('sent.txt').includes('oc_dm|定时 s2 原定'), '跳过回报发到 s2 的会话')
+    await sleep(200)
+    assert.match((await tool(r, 'list')).text, /^s3 once .*不会触发/)
+  } finally { r.close() }
+})
+
+test('定时：「停」后暂停，下一条新指令恢复并标明晚了多久',() => rig(async r => {
   r.add(msg('om_stop', 'ou_ok', { content: '停' }))
   await until(() => r.file('sent.txt').includes('定时已暂停'), '回执')
   await tool(r, 'add', { kind: 'once', at: new Date(Date.now() + 100).toISOString(), text: '暂停中' })

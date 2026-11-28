@@ -211,6 +211,24 @@ test('企业微信 channel：默认全部放行，不配 allow 也行；谁发�
   }
 })
 
+test('企业微信 channel：schedule_add 带企业微信的 chat_id 才加，到点送进会话、记在那个会话名下；飞书的会话 id 拦下', () => withRig({ scheduleTickSec: 0.05 }, async (r, fake) => {
+  const { tools } = await r.ask({ t: 'tools' })
+  assert.match(tools.find(t => t.name === 'schedule_add').inputSchema.properties.chat_id.description, /企业微信会话.*userid/)
+  const at = () => new Date(Date.now() + 300).toISOString()
+  const none = await r.call('schedule_add', { kind: 'once', at: at(), text: 'x' })
+  assert.ok(none.isError)
+  assert.match(none.content[0].text, /没配 statusChat/)
+  const feishu = await r.call('schedule_add', { kind: 'once', at: at(), text: 'x', chat_id: 'oc_example' })
+  assert.ok(feishu.isError)
+  assert.match(feishu.content[0].text, /企业微信的会话 id/)
+  const ok = await r.call('schedule_add', { kind: 'once', at: at(), text: '看反馈', chat_id: 'alice' })
+  assert.ok(!ok.isError, ok.content[0].text)
+  await until(() => r.pushes.length === 1, '到点送达')
+  assert.match(r.pushes[0].content, /\[定时 s1\].*看反馈/)
+  assert.equal(r.pushes[0].meta.chat_id, 'alice')
+  assert.equal(fake.sent.length, 0, '到点只是送进会话的通知，不往企业微信发')
+}))
+
 test('企业微信 channel：send_file 把本机图片按图片、其他按文件发出去；不存在的文件报错', () => withRig({}, async (r, fake) => {
   const png = join(r.dir, '图.png')
   writeFileSync(png, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(700 * 1024, 1)]))
